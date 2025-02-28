@@ -1,0 +1,244 @@
+---
+title: "MODEL_script_memoire"
+output:
+  html_document: default
+  pdf_document: default
+date: "2024-05-31"
+---
+
+```{css, echo=FALSE}
+<style>
+  body {
+    margin: 10px; 
+  }
+</style>
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The aim of this script is to build a behavioral classification model based on the accelerometry signal. The sample population that drives the model is composed of the accelerometry recordings of 6 birds spread over 6 days. 
+Here are the steps involved in its construction: 
+- label the sample data (i.e. manually assign each sequence a behavior based on the observed pattern -the pattern of each behavior being known from a previous study on captive individuals)
+- calculate signal features for each sequence
+- select features useful for discriminating between different behaviors
+- build the model with the selected features, validate it and apply it to unlabeled data
+
+The approach was inspired by the creators of the rabc package
+"Yu H (2024). _rabc: R for Animal Behaviour Classification_. R"package version 0.1.0, <http://github.com/YuHuiDeakin/rabc>."
+
+# Load packages
+
+```{r, echo = TRUE, results='hide', message=FALSE, warning=FALSE}
+library(rabc)
+library(tidyr)
+library(dplyr)
+library(lubridate)
+library(grDevices)
+library(zoo)
+library(ggplot2)
+library(Rmisc)
+```
+
+### Open the files
+
+-   cic has the form x1, y1, z1... x100, y100, z100, behavior (label manually added)
+-   result contains the previously manually calculated features for each 10s-sequence (msa, pitch)
+
+```{r}
+cic <- readRDS("D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Scripts_current/script_memoire/cic")
+result <- readRDS("D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Scripts_current/script_memoire/result")
+```
+
+### Accelerometer data visualization
+
+```{r, warning=FALSE}
+# order by behavior 
+cic <- order_acc(df_raw=cic)
+
+#dynamic graphics to zoom in on questionable areas and highlight misclassified behaviours
+plot_acc(df_raw= cic, axis_num = 3) #3: x,y,z
+#The x axis of this dygraph indicate the row sequence number of sorted dataset
+
+```
+
+### Calculation of training sample features
+
+Mathematical description (mean, standard deviation) of the ACC signal in a segment, as input to machine learning models
+
+Choice of the window size in calculation of the Overall Dynamic Body Acceleration – ODBA- 
+
+In order to adapt the length of time over which the running mean was calculated to the periodicity of the individuals' movement and therefore to the size of our biological model, we adopted the same approach as Shepard et al. (2008). The static accelerations for different moving-average durations and different typical behavioural sequences were compared (not included here). The static component was calculated by taking running means of the total acceleration over periods of 1, 2, 3 and 4s. Dynamic values stabilize when the derived static values approximate a straight line through total acceleration values. A straight line was observed for the walking behaviour from a 3-s window, and only little improvement for the 4-s window.
+Therefore window size = 30 (3s at 10Hz) here.
+
+```{r, cache=T}
+
+#### 1 ####
+#temporal domain : includes mean, variance, standard deviation, max, min, range for EACH AXIS
+#+ ODBA (all axis)
+df_time <- calculate_feature_time(df_raw =  cic, winlen_dba = 30)
+#winlen_dba = size of the moving average
+#base on "transformation de Fourrier rapide (FFT)"
+
+#### 2 ####
+# Frequency domain features : signal unpredictability (depends on fq in Hz, as the param "samp_freq", here 10Hz)
+#  includes main frequency, main amplitude, and frequency entropy for each axis
+df_freq <- calculate_feature_freq(df_raw = cic, samp_freq = 10 )
+```
+
+Add the new (manually calculated) features to df_time
+- MSA (Minimum specific acceleration, Simon, Johnson & Madsen, 2012)
+- Pitch angle (leg inclination from a vertical axis, Wilson, Shepard & Liebsch, 2008)
+
+```{r}
+# add our personnal features
+df_time$msa <- result$moyenne_msa
+df_time$pitch <- result$moyenne_pitch
+df_time$odba_perso <- result$mean_odba
+df_time$msa_min <- result$msa_min
+df_time$pitch_min <- result$pitch_min
+df_time$msa_max <- result$msa_max
+df_time$pitch_max <- result$pitch_max
+df_time$msa_sd <- result$msa_sd
+df_time$pitch_sd <- result$pitch_sd
+df_time$msa_range <- result$msa_range
+df_time$pitch_range <- result$pitch_range
+```
+
+### Selection features
+
+Selection of a relevant subset for the model 
+Not too much to avoid overlearning, facilitate interpretation and shorten calculation time.
+But enough to discriminate each behaviour.
+
+* Selection process*
+The filter part removes any redundant features based on the absolute values of the pair-wise correlation coefficients between features. 
+The wrapper part applies stepwise forward selection (SFS) using the extreme gradient boosting (XGBoost) model, which is not only used for feature selection but also for the final classification model 
+
+Here's how it works, as described by the authors of the ‘rabc’ package: 
+- "In the first round, each feature is individually used to train a classification model by XGBoost. 
+The feature with highest overall accuracy will be kept into the selected feature set. 
+- Then, in the second round, each remaining feature will be combined with the first selected feature 
+to train a classification model and the pair with the highest accuracy will be kept into the selected feature set.
+- This process continues, each round yielding an additional feature on top of the features already selected in previous rounds. This process will stop when the number of rounds equals the no_features setting”. 
+For our model, a value of 10 rounds maximum has been defined." 
+
+```{r, echo = TRUE, results='hide', warning = F, cache=T}
+labels <- cic$cpt #behavior column
+
+#Selection process 
+#combination of a filter and a wrapper feature selection method
+
+#« cutoff = 0,9 » 
+#A default threshold correlation coefficient (cutoff parameter) of 0.9 was chosen so that the selected features had no correlations. 
+
+selection <- select_features(df_feature = cbind(df_time, df_freq), cutoff = 0.9, vec_label = labels, no_features = 10)
+#no_features also determines how many rounds of SFS are being conducted.
+```
+
+## Plot accuracies of selected features.
+
+```{r}
+# [[1]] contains a matrix providing the classification accuracy for each of the features (columns) across all steps (rows, top row being the first step) of the SFS process.
+# [[2]] contains the names of the selected features in the order in which they were selected in the SFS process
+plot_selection_accuracy(results = selection)
+# y_max,y_min, msa, x_min
+```
+### Feature display
+
+For each selected feature (+ the ODBA, because it is one of the variable of interest in the study): display the accelerometry pattern for all behaviours and the range of their values.
+```{r, warning=FALSE}
+# feature value for each behavior
+plot_feature(df_feature = df_time[, "y_max", drop = F], vec_label = labels)
+plot_feature(df_feature = df_time[, "msa_sd", drop = F], vec_label = labels)
+plot_feature(df_feature = df_time[, "ODBA", drop = F], vec_label = labels)
+plot_feature(df_feature = df_time[, "y_min", drop = F], vec_label = labels)
+plot_feature(df_feature = df_time[, "z_variance", drop = F], vec_label = labels)
+
+#Boxplot 
+plot_grouped_feature(df_feature = df_time[,"y_max", drop = F], vec_label = labels, geom = "boxplot")
+plot_grouped_feature(df_feature = df_time[,"msa_sd", drop = F], vec_label = labels, geom = "boxplot")
+plot_grouped_feature(df_feature = df_time[,"ODBA", drop = F], vec_label = labels, geom = "boxplot")
+plot_grouped_feature(df_feature = df_time[,"y_min", drop = F], vec_label = labels, geom = "boxplot")
+plot_grouped_feature(df_feature = df_time[,"z_variance", drop = F], vec_label = labels, geom = "boxplot")
+
+```
+
+#Integrative visualisation with several domain choice
+
+```{r, echo = TRUE, results='hide', warning=FALSE}
+#Trace les cpt avec une couleur en réduisant les dimensions (on souhaite un groupe isolé par cpt dans l'idéal) -> issu de shiny
+plot_UMAP(df_time = df_time, df_freq = df_freq, label_vec = labels)
+# Tab 1: "UMAP calculation and tuning"—assists with evaluating whether ACC features adequately represent behaviors. 
+# Tab 2: "Feature visualization through UMAP"—can show how feature values vary across the two-dimensional UMAP plot. 
+# Tab 3: "Selected features"—assists with evaluating the performance of selected features in differentiating between the different behaviors.
+
+```
+
+# Training and model validation
+
+(a) machine learning model hyperparameter tuning by cross-validation,
+(b) model training with the optimal hyperparameter set
+(c) evaluating model performance through validation with a test dataset.
+
+-   Cross-validation
+
+```{r, warning = F}
+#Cross-validation
+
+#train a supervised machine learning model (XGBoost in this package) with the selected, most relevant features through function train_model. 
+model_output <- train_model(df = df_time[, c("y_max","msa_sd", "y_min", "z_variance")], vec_label = labels, train_ratio = 0.75)
+#default hyperparameters with a fixed setting of “nrounds = 10”.
+#“train_ratio” determines the percentage of data used to train the model, the remainder of the data being used for model validation.
+#confusion matrix depicting how well the ultimate behavior classification model predicts the different behaviors based on the validation part of the dataset only
+```
+
+```{r}
+#Other method for validation : other confusion matrix method
+predictions <- plot_confusion_matrix(df_feature = df_time[,c("y_max","msa_sd", "y_min", "z_variance")], vec_label = labels)
+#the entire dataset is randomly partitioned into five parts. In five consecutive steps, 
+#each of the five parts is used as a validation set, while the remaining four parts are used for model training. 
+
+
+#Using model : example 
+df_time_prediction <- calculate_feature_time(df_raw = cic[1:100,], winlen_dba = 30)
+#add pitch and msa
+df_time_prediction$msa <- result$moyenne_msa[1:100]
+df_time_prediction$pitch <- result$moyenne_pitch[1:100]
+df_time_prediction$msa_min <- result$msa_min[1:100]
+df_time_prediction$pitch_min <- result$pitch_min[1:100]
+df_time_prediction$msa_max <- result$msa_max[1:100]
+df_time_prediction$pitch_max <- result$pitch_max[1:100]
+df_time_prediction$msa_sd <- result$msa_sd[1:100]
+df_time_prediction$pitch_sd <- result$pitch_sd[1:100]
+df_time_prediction$msa_range <- result$msa_range[1:100]
+df_time_prediction$pitch_range <- result$pitch_rangeh[1:100]
+```
+
+
+Example of how to use it on unlabeled data:
+```{r}
+#treats the first 100 rows as a new dataset to demonstrate the use of the model on another dataset
+predicted_behaviours <- predict(model_output, df_time_prediction[,c("y_max","msa_sd", "y_min", "z_variance")])
+```
+
+
+It seems that the model works well with these features
+
+## Check results
+
+Original behaviors are grouped together and separated by dotted lines, with the corresponding original behavior indicated at the base of the dotted lines. Incorrect predictions are marked by dotted lines with the predicted behavior indicated at the top.
+
+
+
+
+
+
+
+\n
+\n
+\n
+```{r}
+plot_wrong_classifications(df_raw = cic, df_result = predictions)
+```
