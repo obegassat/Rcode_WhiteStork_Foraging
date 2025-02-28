@@ -1,0 +1,511 @@
+---
+title: "SPI_SPEI_2"
+output: html_document
+date: "2024-06-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+## Library
+
+```{r, echo = FALSE, include = FALSE}
+library(lubridate)
+library(dplyr)
+library(gridExtra)
+library(ggplot2)
+library(SPEI)
+library(zoo)
+```
+
+## Import hourly weather data
+
+```{r}
+# DATA pathway for weather data
+way <- "D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Météo/Meteo_horaire/"
+
+fichiers <- list.files(way, pattern = "\\.csv$", full.names = TRUE)
+
+# Store the files (indiv_year each)
+elem <- list()
+
+# Import each file as an element in the list elem
+for (fichier in fichiers) {
+  nom_fichier <- basename(fichier)  # Extraction du nom du fichier
+  data <- read.csv2(fichier, header = TRUE, stringsAsFactors = FALSE)  # Importer le fichier CSV
+  elem[[nom_fichier]] <- data  # Stocker le dataframe dans la liste avec le nom du fichier
+}
+
+rm(fichiers, way, fichier)
+```
+
+### Station descriptions:
+
+```         
+ "id": "44103001",     "nom": "ST NAZAIRE-MONTOIR",     "posteOuvert": true,     "typePoste": 0,     "lon": -2.1545,     "lat": 47.313833,     "alt": 3,
+```
+
+```         
+"id": "17248001",     "nom": "MORTAGNE-SUR-GIRONDE_SAPC",     "posteOuvert": true,     "typePoste": 2,     "lon": -0.789833,     "lat": 45.477667,     "alt": 37,
+```
+
+Dates : 2020-01-01T00:00:00Z \> 2020-12-31T00:00:00Z
+
+### Convert and prepare the columns
+
+```{r}
+
+for (i in seq_along(elem)) {
+  # Convert as date
+  elem[[i]]$DATE <- ymd_h(as.character(elem[[i]]$DATE))
+  
+  elem[[i]]$DATE_courte <- ymd(substr(as.character(elem[[i]]$DATE), 1, 10))
+  
+  # Remove columns filled with NA
+  elem[[i]] <- elem[[i]][, colSums(is.na(elem[[i]])) < nrow(elem[[i]])]
+  
+  #replace the station name
+   elem[[i]]$POSTE <- ifelse(elem[[i]]$POSTE == "17248001", "MORTAGNE_SUR_GIRONDE", "ST_NAZAIRE")
+   
+}
+
+
+# Extraire les dataframes individuels de la liste
+morta_2020 <- elem[[1]] %>%
+  dplyr::select(POSTE, DATE, DATE_courte, RR1, TN, TX, T) 
+
+morta_2021 <- elem[[2]] %>%
+  select(POSTE, DATE, DATE_courte, RR1, TN, TX, T) 
+
+morta_2022 <- elem[[3]] %>%
+  select(POSTE, DATE, DATE_courte, RR1, TN, TX, T) 
+
+morta_2023 <- elem[[4]] %>%
+  select(POSTE, DATE, DATE_courte, RR1, TN, TX, T) 
+
+
+st_nz_2020 <- elem[[5]] %>% 
+  select(POSTE, DATE, DATE_courte, RR1, TN, TX, T) 
+
+st_nz_2021 <- elem[[6]] %>%
+  select(POSTE, DATE, DATE_courte, RR1, TN, TX, T) 
+
+st_nz_2022 <- elem[[7]] %>%
+  select(POSTE, DATE, DATE_courte, RR1, TN, TX, T) 
+
+st_nz_2023 <- elem[[8]] %>%
+  select(POSTE, DATE, DATE_courte, RR1, TN, TX, T)
+
+meto <- bind_rows(morta_2020, morta_2021, morta_2022, morta_2023, st_nz_2020, st_nz_2021, st_nz_2022, st_nz_2023)
+meto$RR1 <- as.numeric(meto$RR1)
+meto$dayday <- yday(meto$DATE)
+meto$annee <- year(meto$DATE)
+
+rm(morta_2020, morta_2021, morta_2022, morta_2023, st_nz_2020, st_nz_2021, st_nz_2022, st_nz_2023, i)
+
+colSums(is.na(meto))
+
+
+meto <- meto[complete.cases(meto$RR1), ]
+meto <- meto[complete.cases(meto$TN), ]
+meto <- meto[complete.cases(meto$TX), ]
+meto <- meto[complete.cases(meto$T), ]
+
+```
+
+# Monthly TN, TX, RR
+
+```{r}
+meto$mois <- month(meto$DATE)
+meto <- meto %>% filter(dayday<366)
+meto_mois <- meto %>%
+  dplyr::group_by(POSTE, annee, mois) %>%
+  dplyr::summarize(
+    RRmean = mean(RR1, na.rm = TRUE),
+    TNmean = mean(TN, na.rm = TRUE),
+    TXmean = mean(TX, na.rm = TRUE),
+    Tmean = mean(T, na.rm = TRUE),
+    RRcumul = sum(RR1, na.rm = T)
+  )
+
+summary(meto_mois)
+sum(is.na(meto_mois))
+#display it (0 NA)
+
+
+ggplot(meto_mois, aes(x = mois, y = RRmean)) +  
+  geom_line() + 
+  facet_grid(POSTE ~ annee, scales = "free_x", space = "free") +  # for each year and station
+  labs(x = "Month", y = "Daily mean Rainfall (mm)") +
+   scale_x_continuous(breaks = seq(0, 12, by = 1)) +
+  ggtitle("Average precipitation per month , separated by year and station") 
+
+ggplot(meto_mois, aes(x = mois, y = TNmean)) +  
+  geom_line() + 
+  facet_grid(POSTE ~ annee, scales = "free_x", space = "free") +  # for each year and station
+  labs(x = "Month", y = "Min temperature (°c)") +
+  scale_x_continuous(breaks = seq(0, 12, by = 1)) +
+  ggtitle("Average min tempertaure per month , separated by year and station")
+
+
+ggplot(meto_mois, aes(x = mois, y = TXmean)) +  
+  geom_line() + 
+  facet_grid(POSTE ~ annee, scales = "free_x", space = "free") +  # for each year and station
+  labs(x = "Month", y = "Max temperature (°c)") +
+  scale_x_continuous(breaks = seq(0, 12, by = 1)) +
+  ggtitle("Average max temperature per month, separated by year and station") 
+
+
+ggplot(meto_mois, aes(x = mois, y = Tmean)) +  
+  geom_line() + 
+  facet_grid(POSTE ~ annee, scales = "free_x", space = "free") +  # for each year and station
+  labs(x = "Month", y = "Temperature (°c)") +
+  scale_x_continuous(breaks = seq(0, 12, by = 1)) +
+  ggtitle("Average temperature per month, separated by year and station") 
+
+
+ggplot(meto_mois, aes(x = mois, y = RRcumul)) +  
+  geom_line() + 
+  facet_grid(POSTE ~ annee, scales = "free_x", space = "free") +  # for each year and station
+  labs(x = "Month", y = "Total prcp") +
+  scale_x_continuous(breaks = seq(0, 12, by = 1)) +
+  ggtitle("Total precipitations per month, separated by year and station") 
+
+```
+
+### Daily TN, TX, RR
+
+```{r}
+meto_jour <- meto %>%
+  dplyr::group_by(POSTE, annee, dayday) %>%
+  dplyr::summarize(
+    RRmean = mean(RR1, na.rm = TRUE),
+    RRsm = sum(RR1, na.rm = T),
+    TNmean = mean(TN, na.rm = TRUE),
+    TXmean = mean(TX, na.rm = TRUE),
+    Tmean = mean(T, na.rm = TRUE),
+    mois = first(mois)
+  )
+
+summary(meto_jour)
+#abnormal here
+meto_jour <- meto_jour %>% 
+  filter(dayday < 365)
+
+ggplot(meto_jour, aes(x = dayday, y = RRmean)) +  
+  geom_line() + 
+  facet_grid(POSTE ~ annee, scales = "free_x", space = "free") +  # for each year and station
+  labs(x = "Days since 1st jan", y = "Daily mean Rainfall (mm)") +
+  ggtitle("Average precipitation per day , separated by year and station")
+
+ggplot(meto_jour, aes(x = dayday, y = RRsm)) +  
+  geom_line() + 
+  facet_grid(POSTE ~ annee, scales = "free_x", space = "free") +  # for each year and station
+  labs(x = "Days since 1st jan", y = "Daily total Rainfall (mm)") +
+  ggtitle("Sum of precipitation per day , separated by year and station") 
+
+ggplot(meto_jour, aes(x = dayday, y = TNmean)) +  
+  geom_line() + 
+  facet_grid(POSTE ~ annee, scales = "free_x", space = "free") +  # for each year and station
+  labs(x = "Days since 1st jan", y = "Min temperature (°c)") +
+  ggtitle("Average min tempertaure per day , separated by year and station")
+
+
+ggplot(meto_jour, aes(x = dayday, y = TXmean)) +  
+  geom_line() + 
+  facet_grid(POSTE ~ annee, scales = "free_x", space = "free") +  # for each year and station
+  labs(x = "Days since 1st jan", y = "Max temperature (°c)") +
+  ggtitle("Average max temperature per day, separated by year and station") 
+
+
+ggplot(meto_jour, aes(x = dayday, y = Tmean)) +  
+  geom_line() + 
+  facet_grid(POSTE ~ annee, scales = "free_x", space = "free") +  # for each year and station
+  labs(x = "Days since 1st jan", y = "Temperature (°c)") +
+  ggtitle("Average temperature per day, separated by year and station") 
+```
+
+### Total annual precipitations
+
+```{r}
+pluie_cumul_annee <- meto_mois %>%
+  group_by(POSTE, annee) %>%
+  arrange(annee, mois) %>%
+  mutate(cumul_annuel = cumsum(RRcumul)) %>%
+  ungroup()
+
+ggplot(pluie_cumul_annee, aes(x = mois, y = cumul_annuel)) +  
+  geom_line() + 
+  facet_grid(POSTE ~ annee, scales = "free_x", space = "free") +  # for each year and station
+  scale_x_continuous(breaks = seq(1, 12))+
+  labs(x = "Month", y = "Total precipitation (mm)") +
+  ggtitle("Annual cumulative precipitation, separated by year and station")
+
+
+saveRDS(object = pluie_cumul_annee, file = "D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Météo/Covariables_construites/pluie_cumul_annee.rds")
+write.csv2(pluie_cumul_annee, file = "D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Météo/Covariables_construites/pluie_cumul_annee.csv")
+
+```
+
+# PET : potential evapotranspiration and BAL
+
+Potential evapotranspiration (PET) is the amount of evaporation and transpiration that would occur if a sufficient water source were available. Reference evapotranspiration (ETo) is the amount of evaporation and transpiration from a reference vegetation of grass.
+
+### 17: Monthly PET
+
+```{r}
+#Monthly PET for 17 population
+
+meto17 <- meto_mois %>% filter(POSTE == "MORTAGNE_SUR_GIRONDE") %>% select("POSTE", "annee", "mois", "Tmean", "RRcumul", "TNmean", "TXmean")
+meto17 <- meto17[,-1] #delete the POP column
+
+# hargreaves computes the monthly reference evapotranspiration (ETo) of a grass crop based on the original Hargreaves equation (1994). However, if precipitation data Pre is provided a modified form due to Droogers and Allen (2002) will be used; this equation corrects ETo using the amount of rain of each month as a proxy for irradiation The Hargreaves method requires data on the mean external radiation, Ra. If Ra is not available it can be estimated from the latitude lat and the month of the year.
+meto17$PET_har <- hargreaves(Tmin = meto17$TNmean, Tmax = meto17$TXmean, lat = 45.477667, Pre = meto17$RRcumul)
+meto17$BAL_har <- meto17$RRcumul-meto17$PET_har
+
+# Convert to a ts (time series) for convenience
+meto17_ts <- ts(meto17[, -c(1, 2)], start = c(2020, 1), end = c(2023, 12), frequency = 12)
+plot(meto17_ts)
+
+unique(floor(index(meto17_ts)))
+
+ggplot(meto17, aes(x = mois)) +  
+  geom_line(aes(y = PET_har, color = "PET_har")) +    
+  facet_grid(~ annee, scales = "free_x", space = "free") +  
+  labs(x = "Month", y = "Potential Evapotranspiration (mm)", color = "Legend") +
+  scale_x_continuous(breaks = seq(0, 12, by = 1)) +
+  scale_color_manual(values = c("black")) +
+  ggtitle("Average PET per month, separated by year (station 17)") +
+  theme(legend.position = "top")
+
+```
+
+### 44: Monthly PET
+
+```{r}
+#Monthly PET for 44 population
+
+meto44 <- meto_mois %>% filter(POSTE == "ST_NAZAIRE") %>% select("POSTE", "annee", "mois", "Tmean", "RRcumul", "TNmean", "TXmean")
+meto44 <- meto44[,-1]
+
+#climatic water balance (BAL)
+meto44$PET_har <- hargreaves(Tmin = meto44$TNmean, Tmax = meto44$TXmean, lat = 47.313833, Pre = meto44$RRcumul)
+meto44$BAL_har <- meto44$RRcumul-meto44$PET_har
+
+# Convert to a ts (time series) for convenience
+meto44_ts <- ts(meto44[, -c(1, 2)],start = c(2020, 1), end = c(2023, 12), frequency = 12)
+plot(meto44_ts)
+
+ggplot(meto44, aes(x = mois)) +  
+  geom_line(aes(y = PET_har, color = "PET_har")) +    
+  facet_grid(~ annee, scales = "free_x", space = "free") +  
+  labs(x = "Month", y = "Potential Evapotranspiration (mm)", color = "Legend") +
+  scale_x_continuous(breaks = seq(0, 12, by = 1)) +
+  scale_color_manual(values = c("black")) +
+  ggtitle("Average PET per month, separated by year (station 44)") +
+  theme(legend.position = "top")
+
+```
+
+# SPEI and SPI
+
+SPEI: Calculation of the Standardized Precipitation-Evapotranspiration Index (r-project.org)
+
+Calculation of the Standardized Precipitation-Evapotranspiration Index (SPEI) and the Standardized Precipitation Index (SPI)
+
+Both functions are identical (in fact, spi is just a wrapper for spei), but they are kept separated for clarity. Basically, the functions standardize a variable following a log-Logistic (or Gamma, or PearsonIII) distribution function (i.e., they transform it to a standard Gaussian variate with zero mean and standard deviation of one).
+
+Guide d’utilisation de l’indice de précipitations normalisé (OMM-N° 1090) (wmo.int) : lorsqu'il porte sur moins d'un mois il est peu fiable
+
+DATA : data frame with time ordered values of precipitation (for the SPI) or of the climatic balance precipitation minus potential evapotranspiration (for the SPEI)
+
+SCALE : For example, a value of six would imply that data from the current month and of the past five months will be used for computing the SPEI or SPI \#
+
+## 17: Monthly SPI/SPEI
+
+```{r}
+
+# One and three-months SPEI : Standardized Precipitation-Evapotranspiration Index
+
+#scale =  time scale at which the SPI will be computed (number of months).
+#This way it is possible to incorporate the influence of the past values of the variable in the computation enabling the index to adapt to the memory of the system under study
+
+#heargreaves
+spei17_har <- spei(meto17_ts[, "BAL_har"], scale = 1)
+spei17_3_har <- spei(meto17_ts[, "BAL_har"], scale = 3)
+
+#################
+
+
+# Extract information from `spei` object: summary, call function,
+# fitted values, and coefficients
+#summary(spei17_thor)
+# names(spei17_thor)
+#spei17_thor$call#ave
+spei_har_17 <- spei17_3_har$fitted
+#spei17_thor$coefficients
+
+# Plot `spei` object
+par(mfrow = c(2, 1))
+plot(spei17_har, main = "Meto17heargreaves, SPEI-1month") 
+plot(spei17_3_har, main = "Meto17heargreaves, SPEI-3months")
+
+########
+
+#Standardized Precipitation Index (SPI)
+
+colSums(is.na(meto))
+
+# One and three-months SPI
+spi_17 <- spi(meto17_ts[,"RRcumul"], scale = 1)
+spi_17_3 <- spi(meto17_ts[,"RRcumul"], scale = 3)
+
+par(mfrow = c(2, 1))
+plot(spi_17, "Meto17, SPI-1month")
+plot(spi_17_3, "Meto17, SPI-3months")
+
+#save
+spi_17 <- spi_17_3$fitted
+
+saveRDS(object = spi_17, file = "D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Météo/Covariables_construites/SPI_17_3m.rds")
+
+saveRDS(object = spei_har_17, file = "D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Météo/Covariables_construites/SPEI_har17_3m.rds")
+
+```
+
+## 44: Monthly SPI/SPEI
+
+```{r}
+# One and three-months SPEI
+spei44_har <- spei(meto44_ts[, "BAL_har"], scale = 1) 
+spei44_3_har<- spei(meto44_ts[, "BAL_har"], scale = 3)
+
+# Extract information from `spei` object: summary, call function,
+# fitted values, and coefficients
+# summary(spe44)
+# names(spei44)
+#spei17$call
+#spei44$fitted
+#spei17$coefficients
+
+# Plot `spei` object
+par(mfrow = c(2, 1))
+plot(spei44_har, main = "Meto17har, SPEI-1month")
+plot(spei44_3_har, main = "Meto1har, SPEI-3months")#NA because based on previous measures ? Search in the previoous year ?
+
+#save
+spei_har_44 <- spei44_3_har$fitted
+
+#Comparer les deux POP SPEI 
+par(mfrow=c(1,2))
+plot(spei44_3_har, main = "Meto1har, SPEI-3months")
+plot(spei17_3_har, main = "Meto17heargreaves, SPEI-3months")
+########
+
+# One and three-months SPI
+spi_44 <- spi(meto44_ts[, "RRcumul"], 1)
+spi_44_3 <- spi(meto44_ts[, "RRcumul"], 3)
+
+#Comparer les deux POP SPI 
+par(mfrow = c(2, 1))
+plot(spi_44, "Meto17, SPI-1month")
+plot(spi_44_3, "Meto17, SPI-3months")
+plot(spi_17_3,  "Meto44, SPI-3months")
+
+#save
+spi_44 <- spi_44_3$fitted
+
+saveRDS(object = spi_44, file = "D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Météo/Covariables_construites/SPI_44_3m.rds")
+
+saveRDS(object = spei_har_44, file = "D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Météo/Covariables_construites/SPEI_har44_3mrds")
+
+```
+
+Correlation analyses Between SPEI and SPI
+
+```{r}
+
+spei_har_44_df <- data.frame(SPEI = spei_har_44, 
+                             Year = rep(c(2020, 2021, 2022, 2023), each = 12), 
+                             Month = rep(c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 4))
+
+spei_har_17_df <- data.frame(SPEI = spei_har_17, 
+                             Year = rep(c(2020, 2021, 2022, 2023), each = 12), 
+                             Month = rep(c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 4))
+
+spi_17_df <- data.frame(SPI = spi_17, 
+                              Year = rep(c(2020, 2021, 2022, 2023), each = 12), 
+                              Month = rep(c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 4))
+
+spi_44_df <- data.frame(SPI = spi_44, 
+                             Year = rep(c(2020, 2021, 2022, 2023), each = 12), 
+                             Month = rep(c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 4))
+
+
+har17<- data.frame(SPEI = spei_har_17_df$SPEI, SPI = spi_17_df$SPI)
+har44<- data.frame(SPEI = spei_har_44_df$SPEI, SPI = spi_44_df$SPI)
+
+cor(har44, use = "complete.obs")
+cor(har44, use = "complete.obs")
+
+plot_with_regression <- function(data, title) {
+  ggplot(data, aes(x = SPEI, y = SPI)) +
+    geom_point() +
+    geom_smooth(method = "lm", se = FALSE, color = "red") +
+    labs(title = title, x = "SPEI", y = "SPI")
+}
+
+#representation
+plot(spei17_3_har, main = "17")
+plot(spei44_3_har, mains = "44")
+plot(spi_17_3, main ="17")
+plot(spi_44_3, main = "44")
+```
+
+# Save a dataframe for environnemental decsriptors by month
+
+```{r}
+annee <- rep(2020:2023, each = 12)
+mois <- rep(1:12, times = 4)
+annee_mois <- data.frame(ANNEE = annee, MOIS = mois)
+
+# Add to each df
+har17 <- cbind(har17, annee_mois)
+har44 <- cbind(har44, annee_mois)
+
+suffixes <- c ("_har_17", "_har_44")
+
+dataframes <- list(har17, har44)
+
+
+# Iterating through the dataframes
+for (i in 1:length(dataframes)) {
+  # Getting the current dataframe
+  df <- dataframes[[i]]
+  
+  # Getting the current suffix
+  suffix <- suffixes[i]
+  
+  # Renaming columns by adding the suffix excluding month and year
+  colnames(df)[-c(grep("^MOIS$|^ANNEE$", colnames(df)))] <- paste0(colnames(df)[-c(grep("^MOIS$|^ANNEE$", colnames(df)))], suffix)
+  
+  # Replacing the modified dataframe in the list
+  dataframes[[i]] <- df
+}
+
+# Displaying the modified dataframes
+for (i in 1:length(dataframes)) {
+  print(dataframes[[i]])
+}
+
+
+har17 <- dataframes[[1]]
+har44 <- dataframes[[2]]
+
+spi_spei_allmethods <- har44 %>% left_join(har17, by = c("MOIS", "ANNEE"))
+
+write.csv2(spi_spei_allmethods,"D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Météo/Covariables_construites/spi_spei_3m.csv")
+```
