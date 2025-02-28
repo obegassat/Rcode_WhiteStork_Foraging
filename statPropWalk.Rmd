@@ -1,0 +1,1098 @@
+---
+title: '%foraging'
+output: html_document
+date: "2024-05-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+
+```{r, message= FALSE, warning=FALSE}
+library(dplyr)
+library(corrplot)
+library(lme4) # for lmer
+library(nlme) #for gls (glmm)
+library(lmerTest)
+library(Matrix) 
+library(MuMIn) # for Dredge()
+library(car) # for vif()
+library(lubridate)
+library(GGally) #correlation synthese
+library(mgcv) #for gam
+library(lmtest) #Breusch-Pagan test
+library(effects)
+library(flexmix) #for BIC extraction
+library(performance) #R²
+library(gridExtra)#drif.arrange
+```
+
+## Prepare DATA
+
+```{r}
+
+data1 <-
+  read.table(
+    "D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Scripts_current/Analyses_stats/matrice_ciccic_2025.txt",
+    header = T,
+    dec = ","
+  )
+#79 periods
+
+colnames(data1)[colnames(data1) == "SEXE"] <- "SEX"
+colnames(data1)[colnames(data1) == "n_all_bhv"] <- "tot_month_activity"
+colnames(data1)[colnames(data1) == "n_foraging"] <- "tot_month_foraging"
+colnames(data1)[colnames(data1) == "prop_for_month"] <- "mean_.foraging"
+
+
+data <-
+  data1[, c(
+    "device",
+    "ID",
+    "id_30",
+    "mean_.foraging",
+    "Deviceyear",
+    "tot_month_activity",
+    "tot_month_foraging",
+    "POP",
+    "SEX",
+    "PRODUCTION_envol",
+    "CHICKAGE",
+    "SPEI_har_pond"
+  )]
+
+
+#Convert into the good type
+data <- data %>%
+  mutate(across(c(POP, SEX, PRODUCTION_envol, CHICKAGE, id_30, device), as.factor))
+  #standardize the numeric environmental variables
+data$SPEI_har_pond <- as.numeric(data$SPEI_har_pond)
+data$mean_.foraging <- as.numeric(data$mean_.foraging)
+
+#no scale
+
+#rename columns
+data <- data %>%
+  rename(prop_foraging = mean_.foraging)
+table(data$PRODUCTION_envol)
+# Only one individual has 5 chicks :add it to the 4+ class
+data$PRODUCTION_envol <-
+  ifelse(
+    data$PRODUCTION_envol == 4 |
+      data$PRODUCTION_envol == 5,
+    "4+",
+    as.character(data$PRODUCTION_envol)
+  )
+data$PRODUCTION_envol <- as.factor(data$PRODUCTION_envol)
+summary(data)
+```
+
+# % Foraging
+
+#How to explain the monthly mean of the daily % of foraging activity?
+
+### Prepare data
+
+```{r}
+test <-data
+ 
+#Check for missing values
+colSums(is.na(test))
+
+#Y distribution
+#Y between 0 and 1 (%)
+test$prop_foraging <- test$prop_foraging/100
+ratio <- cbind(test$tot_month_foraging, test$tot_month_activity-test$tot_month_foraging) #for the glm building
+
+par(mfrow=c(2,2))
+# Boxplot
+boxplot(test$prop_foraging,col='blue',ylab='Daily %of foraging')
+# Cleveland plot
+dotchart(test$prop_foraging,pch=16,col='blue',xlab='Monthly mean \n of the daily %of foraging')
+# Histogram
+hist(test$prop_foraging,col='blue',xlab="Monthly mean\n of the daily %of foraging",main="")
+# Quantile-Quantile plot
+qqnorm(test$prop_foraging,pch=16,col='blue',xlab='')
+qqline(test$prop_foraging,col='red')
+# Non normal
+shapiro.test(test$prop_foraging) #W = 0.97681, p-value = 0.1598 Normal law ok
+#No outlier
+```
+
+### Potential relationships between Xs and Y
+
+```{r}
+par(mfrow=c(1,4))
+
+# SPEI
+plot(
+  test$prop_foraging ~ test$SPEI_har_pond,
+  pch = 16,
+  col = 'blue',
+  xlab = 'SPEI',
+  ylab = 'Monthly mean of the daily %of foraging'
+)
+
+# Production
+boxplot(prop_foraging ~ PRODUCTION_envol,
+        data = test,
+        main = "Monthly mean of the daily %of foraging")
+# sex
+boxplot(
+  prop_foraging ~ SEX,
+  data = test,
+  col = c('blue3', 'red2'),
+  main = "Monthly mean of the daily %of foraging"
+)
+# Chick age
+boxplot(
+  prop_foraging ~ CHICKAGE,
+  data = test,
+  col = c('blue3', 'red2'),
+  main = "Monthly mean of the daily %of foragingt"
+)
+```
+
+Mean daily % foraging: increases with the number of chicks, decreases in males, increases with the chick age
+
+### Choice of the random factors
+
+```{r}
+#GLM, constant model
+mod <- glm(ratio~1, family = binomial(link = "logit"), data = test)
+AICc(mod)#3883.344
+#GLMM avec ratio
+mod0 <- glmer(ratio~(1|POP/device),family = binomial(link = "logit"), data = test)
+AICc(mod0)#3056.669
+#singular
+mod1 <- glmer(ratio~(1|POP),family = binomial(link = "logit"), data = test)
+AICc(mod1)#3885.45
+mod2 <- glmer(ratio~(1|POP/device) + (1|PRODUCTION_envol),family = binomial(link = "logit"), data = test)
+AICc(mod2)#2948.93
+mod3 <- glmer(ratio~(1|PRODUCTION_envol),family = binomial(link = "logit"), data = test)
+AICc(mod3)#3633.468
+mod4 <- glmer(ratio~(1|device),family = binomial(link = "logit"), data = test)
+AICc(mod4)#3054.507
+mod5 <- glmer(ratio~(1|device) + (1|POP),family = binomial(link = "logit"), data = test)
+AICc(mod5)#3056.669
+
+#Compare AICc
+model_list <- list(mod,mod0, mod1, mod2, mod3, mod4, mod5)
+aiccs <- sapply(model_list, AICc)
+aiccs #3883.344 3056.669 3885.450 2948.930 3633.468 3054.507 3056.669
+best_model <- model_list[[ which.min(aiccs)]]
+best_model #ratio ~ (1 | POP/device) + (1 | PRODUCTION_envol)
+```
+
+Keep ratio \~ (1 \| POP/device) + (1 \| PRODUCTION_envol)
+
+### GAMM with the complete model: linearity of the relationship?
+
+```{r}
+#####Continuous variables 
+
+#remove ecart
+modgam2 <- gamm(ratio ~ s(SPEI_har_pond) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modgam2) #657.2088
+
+#########Factors
+#remove sex
+modgam4 <- gamm(ratio ~   s(SPEI_har_pond) + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modgam4) #935.2852 keept it
+
+#remove chick age
+modgam5 <- gamm(ratio ~   s(SPEI_har_pond) + SEX,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modgam5) #1268.581
+#Keep the factors
+
+modgam <-  gamm(ratio ~ s(SPEI_har_pond) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modgam)#657.2088
+
+par(mfrow =c(2,2))
+plot(modgam$gam)
+summary(modgam$gam) #REf df = 8.628 - complex relationship
+
+ # Each plot represents the smoothed effect of a continuous variable on the response variable. 
+ # The solid line is the estimated effect, and the shaded areas represent the 95% confidence intervals.
+summary(modgam$lme)
+```
+## GAMM model:
+
+```{r}
+#Selected model
+modgam <- gamm(ratio ~ s(SPEI_har_pond) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modgam)#657.2088
+
+#Standardized residuals vs predicted values: random distribution = ok
+residuals_gam <- residuals(modgam$gam, type = "pearson")
+fitted_values_gam <- fitted(modgam$gam)
+
+plot(fitted_values_gam, residuals_gam, xlab = "Predicted values", ylab = "Standardized residuals",
+     main = "Standardized residuals vs predicted values")
+abline(h = 0, col = "red") #ok
+
+plot(modgam$gam)
+```
+
+### Model validation
+
+```{r}
+modok <- gamm(ratio ~ s(SPEI_har_pond) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok)#657.2088
+
+#residuals
+residu <- residuals(modok$gam, type = "pearson")
+fitted <- fitted(modok$gam)
+qqnorm(residu)
+qqline(residu)
+#normalité des résidus
+hist(residu)
+
+modok_gam <- modok$gam
+# vif(modok_gam)
+#(Zuur et al: non-linear relationships are not picked up by the VIF
+
+# residuals vs fitted (homoscedasticity)
+plot(residu~fitted
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok for independance: no pattern
+
+
+#residuals against factors (relationship linearity and variance equality)
+plot(residu~ test$CHICKAGE,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "Chick age",
+         main = "")
+abline(h = 0)
+
+plot(residu~ test$SEX,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "SEX",
+         main = "")
+abline(h = 0)
+
+plot(residu~ test$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+
+#R²
+summary(modok$gam)#R-sq.(adj) =  0.606
+
+#BIC
+BIC(modok$lme)# 672.2175
+#AICc
+AICc(modok)#657.2088
+
+#is k sufficient?
+gam.check(modok_gam)
+#p-value >0.05 = yes
+
+#IConfidence interval (95%) for each variable
+confint(modok_gam, oldNames=FALSE)
+plot(modok$gam) #hard to interpret, is k really ok and not too high?
+summary(modok$gam)
+```
+
+#K selection
+
+```{r}
+#Routine to visually compare the different values of k
+
+# Function to fit the model and extract the smooth term plot data
+fit_gamm_and_extract_plot_data <- function(k1, data) {
+  mod <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k = k1) + 
+                        SEX + CHICKAGE, 
+              random = list(POP = ~1|device, PRODUCTION_envol = ~1), 
+              family = binomial(link = "logit"), data = data)
+  
+  # Extract smooth terms
+  smooth_terms <- predict(mod$gam, type = "terms", se.fit = TRUE)
+  df <- data.frame(data, 
+                   SPEI_har_pond_smooth = smooth_terms$fit[, "s(SPEI_har_pond)"], 
+                   SPEI_har_pond_se = smooth_terms$se.fit[, "s(SPEI_har_pond)"], 
+                   k1 = k1)
+  
+  # Extract AICc value
+  aicc_value <- AICc(mod$lme)
+  
+  list(plot_data = df, aicc = aicc_value)
+}
+
+# Fit models for k values from 1 to 9 and store results
+k_values <- 1:6
+results <- lapply(k_values, function(k) fit_gamm_and_extract_plot_data(k, test))
+
+# Combine plot data
+plot_data <- do.call(rbind, lapply(results, function(res) res$plot_data))
+
+# Extract AICc values
+aicc_values <- data.frame(k = k_values, AICc = sapply(results, function(res) res$aicc))
+
+# Print AICc values for comparison
+print(aicc_values)
+
+# Plot SPEI_har_pond smooth terms
+p1 <- ggplot(plot_data, aes(x = SPEI_har_pond, y = SPEI_har_pond_smooth, color = as.factor(k1))) +
+  geom_line() +
+  geom_line(aes(y = SPEI_har_pond_smooth + 2 * SPEI_har_pond_se), linetype = "dashed") +
+  geom_line(aes(y = SPEI_har_pond_smooth - 2 * SPEI_har_pond_se), linetype = "dashed") +
+  labs(title = "SPEI_har_pond Smooth Terms with Different k",
+       x = "SPEI_har_pond", y = "Smooth Estimate",
+       color = "k value") +
+  theme_minimal()
+
+# Display the plots
+p1
+
+```
+K adjustment
+Median of all the k combinations that have less than 2 points more than the min AICc
+
+Avec Dredge
+```{r}
+
+#retirer les effets randoms
+model_gam <- gam(ratio ~ s(SPEI_har_pond, bs = "cr", k=3) + SEX + CHICKAGE,
+                 family = binomial(link = "logit"),
+                 data = test, na.action = na.fail)
+
+Dredge <- dredge(model_gam)
+
+Dredge
+
+```
+
+```{r}
+#automated adjustment: k Ref =  8.690
+
+#with k = 1
+
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=3) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+#k a été augmenté à sa valeur minimale telle que le modèle converge = 3
+gam_model <- modok1$gam
+AICc(modok1)#744.304
+BIC(modok1)
+BIC(modok1$lme)
+summary(modok1$gam)
+summary(modok1$lme)
+r.squaredGLMM(modok1$lme)
+k.check(modok1$gam)
+
+#juste sex et spei
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=3) + SEX,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)#2066.364
+r.squaredGLMM(modok1$lme)
+
+#juste chick
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=3) + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)#1073.691
+
+#juste SPEI
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=3), random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)#2399.027
+r.squaredGLMM(modok1$lme)
+
+#juste aléatoire
+modok1 <- gamm(ratio ~ 1,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)#2575.557
+r.squaredGLMM(modok1$lme)
+
+#Juste sex
+modok1 <- gamm(ratio ~ SEX,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)#2285.422
+r.squaredGLMM(modok1$lme)
+
+#juste chick age
+modok1 <- gamm(ratio ~ CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)
+r.squaredGLMM(modok1$lme)
+
+#SEX + CHICK AGE
+modok1 <- gamm(ratio ~ CHICKAGE+ SEX,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)
+r.squaredGLMM(modok1$lme)
+
+#best = complet
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=1) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)
+r.squaredGLMM(modok1$lme)
+
+#try other values of k
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=2) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)# 744.304
+
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=3) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)# 744.304
+
+###EGALITE car au minimum k = 3
+
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=4) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)#744.129
+
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=5) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)# 738.8517
+
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=6) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)# 707.3365
+
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=7) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)#732.6863
+
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=8) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)#  660.3094 best model
+BIC(modok1)
+BIC(modok1$lme)
+summary(modok1$gam)
+r.squaredGLMM(modok1$lme)
+k.check(modok1$gam)
+
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=9) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)# 686.8168
+
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=10) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)#666.3258
+
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=11) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)#645.4085
+
+modok1 <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=12) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), data = test)
+AICc(modok1)#614.0236
+```
+Best k = 1 (more parsimonious)
+After 9 overfitting
+
+### GAMM k1 Model validation
+
+```{r}
+modok <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=3) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), method = "REML", data = test)
+AICc(modok)# 744.304
+coef(modok$gam)
+      #  (Intercept)               SEXM          CHICKAGE1 s(SPEI_har_pond).1 s(SPEI_har_pond).2 
+      # -0.392933757       -0.301250902        0.555548341       -0.004789189       -0.150514592 
+summary(modok$gam)
+summary(modok$gam)$p.table
+summary(modok$gam)$s.table
+VarCorr(modok$lme)
+summary(modok$lme)
+
+# Variances extraites
+var_Xr <- 3.667438e-03
+var_POP <- 4.368242e-10
+var_PRODUCTION_envol <- 2.454076e-02 
+var_residual <- 1.000000e+00
+
+# Variance totale (somme des variances)
+var_total <- var_Xr + var_POP + var_PRODUCTION_envol + var_residual
+
+# Proportions de variance expliquée
+prop_Xr <- var_Xr / var_total *100
+prop_POP <- var_POP / var_total*100
+prop_PRODUCTION_envol <- var_PRODUCTION_envol / var_total*100
+prop_residual <- var_residual / var_total*100
+
+# Affichage des proportions
+prop_Xr
+prop_POP
+prop_PRODUCTION_envol
+prop_residual
+plot(modok$gam)
+
+#residuals
+residu <- residuals(modok$gam, type = "pearson")
+fitted <- fitted(modok$gam)
+qqnorm(residu)
+qqline(residu)
+#normalité des résidus
+hist(residu)
+
+modok_gam <- modok$gam
+# vif(modok_gam)
+#(Zuur et al: non-linear relationships are not picked up by the VIF
+
+# residuals vs fitted (homoscedasticity)
+plot(residu~fitted
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok for independance: no pattern
+
+
+#residuals against factors (relationship linearity and variance equality)
+plot(residu~ test$CHICKAGE,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "Chick age",
+         main = "")
+abline(h = 0)
+
+plot(residu~ test$SEX,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "SEX",
+         main = "")
+abline(h = 0)
+
+plot(residu~ test$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+
+#R²
+summary(modok$gam)#R-sq.(adj) =   0.6  
+summary(modok$lme)
+VarCorr(modok$lme)
+#BIC
+BIC(modok$lme)# 642.0765
+BIC(modok) #
+#AICc
+AICc(modok)
+
+
+#Avons-nous optimisé le compromis entre le lissage (λ) et la flexibilité (k) dans notre modèle?
+#is k sufficient?
+gam.check(modok_gam)
+#p-value >0.05 = yes k' ne doit pas être trop proche de edf
+
+# k’ = 2.00, edf = 1.88 : La dimension effective (edf) est proche de k’, ce qui suggère que le modèle utilise presque toute la flexibilité disponible.
+# 
+# k-index = 0.84 : L’indice est inférieur à 1 mais pas extrêmement faible. Cela peut indiquer une légère contrainte due à une dimension de base insuffisante.
+# 
+# p-value = 0.14 : Une valeur p > 0.05 suggère qu'il n'y a pas de preuve statistique que k’ est trop faible.
+
+#IConfidence interval (95%) for each variable
+confint(modok$gam, oldNames=FALSE)
+plot(modok$gam) #hard to interpret, is k really ok and not too high?
+summary(modok$lme)
+
+### Prédictions pour avoir un estimate du SPEI
+# Calculer les prédictions du modèle
+predictions <- predict(modok_gam$gam, type = "terms", se.fit = TRUE)
+
+# Extraire l'estimation pour le terme smoothé 's(SPEI_har_pond)'
+smooth_estimate <- predictions$fit[, "s(SPEI_har_pond)"]
+
+# Si vous voulez aussi obtenir les erreurs standards associées à ces prédictions
+se_smooth_estimate <- predictions$se.fit[, "s(SPEI_har_pond)"]
+
+# Afficher les estimations
+head(smooth_estimate)
+head(se_smooth_estimate)
+
+
+#autocorrélation temporelle eds résidus ?
+par(mfrow = c(1,2))
+acf(resid(modok_gam), lag.max = 36, main = "ACF")
+pacf(resid(modok_gam), lag.max = 36, main = "pACF")
+#2 et 1 pic seulemnt
+
+plot(modok_gam, select = 1)
+
+test$predicted <- predict(modok, type = "response")
+
+ggplot(test, aes(x = SPEI_har_pond, y = predicted)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "blue") +
+  labs(title = "GAMM Predictions",
+       x = "SPEI_har_pond",
+       y = "Predicted Ratio") +
+  theme_minimal()
+
+
+
+#############
+
+# Créer une grille de nouvelles données pour prédire les effets
+new_data <- expand.grid(SPEI_har_pond = seq(min(test$SPEI_har_pond), max(test$SPEI_har_pond), length.out = 100),
+                        SEX = factor(c('M', 'F'), levels = levels(test$SEX)),
+                        CHICKAGE = factor(c('1', '2'), levels = levels(test$CHICKAGE)))
+
+# Prédire avec le modèle
+preds <- predict(modok$gam, newdata = new_data, type = "link", se.fit = TRUE)
+
+# Ajouter les prédictions à la grille de nouvelles données
+new_data$fit <- preds$fit
+new_data$se.fit <- preds$se.fit
+
+# Calculer les intervalles de confiance à 95% sur l'échelle du lien
+new_data$upper <- new_data$fit + 1.96 * new_data$se.fit
+new_data$lower <- new_data$fit - 1.96 * new_data$se.fit
+
+# Convertir les intervalles de confiance à l'échelle de la réponse
+new_data$pred <- modok$gam$family$linkinv(new_data$fit)
+new_data$pred_upper <- modok$gam$family$linkinv(new_data$upper)
+new_data$pred_lower <- modok$gam$family$linkinv(new_data$lower)
+
+ggplot(new_data, aes(x = SPEI_har_pond, y = pred, color = SEX, linetype = CHICKAGE)) +
+    geom_line() +
+    geom_ribbon(aes(ymin = pred_lower, ymax = pred_upper, fill = SEX), alpha = 0.2) +
+    labs(title = "Effet de SPEI_har_pond sur ratio par SEX et CHICKAGE",
+         x = "SPEI_har_pond", y = "Prédiction du ratio") +
+    theme_minimal() +
+    scale_fill_manual(values = c('blue', 'red')) +  # Ajuster les couleurs si nécessaire
+    scale_color_manual(values = c('blue', 'red'))  # Ajuster les couleurs si nécessaire
+
+##################
+
+# Créer une nouvelle grille de valeurs pour SPEI_har_pond
+new_data <- data.frame(SPEI_har_pond = seq(min(test$SPEI_har_pond), max(test$SPEI_har_pond), length.out = 100),
+                       SEX = factor("F"),  # Fixer les niveaux de SEX et CHICKAGE pour simplifier
+                       CHICKAGE = factor("1"))
+
+# Prédire les valeurs de réponse et les intervalles de confiance
+preds <- predict(modok$gam, newdata = new_data, se.fit = TRUE, type = "link")
+
+# Calculer les intervalles de confiance à 95%
+new_data$fit <- preds$fit
+new_data$se.fit <- preds$se.fit
+new_data$upper <- preds$fit + 1.96 * preds$se.fit
+new_data$lower <- preds$fit - 1.96 * preds$se.fit
+new_data$pred <- modok$gam$family$linkinv(preds$fit)
+new_data$pred_upper <- modok$gam$family$linkinv(new_data$upper)
+new_data$pred_lower <- modok$gam$family$linkinv(new_data$lower)
+
+
+ggplot(new_data, aes(x = SPEI_har_pond, y = pred)) +
+    geom_line() +
+    geom_ribbon(aes(ymin = pred_lower, ymax = pred_upper), alpha = 0.2) +
+    labs(title = "Effet de SPEI_har_pond sur ratio",
+         x = "SPEI_har_pond", y = "Prédiction du ratio") +
+    theme_minimal()
+
+
+
+p_obj <- plot(modok$gam, residuals = TRUE)
+p_obj <- p_obj[[1]] # just one smooth so select the first component
+sm_df <- as.data.frame(p_obj[c("x", "se", "fit")])
+data_df <- as.data.frame(p_obj[c("raw", "p.resid")])
+
+## plot
+ggplot(sm_df, aes(x = x, y = fit)) +
+  geom_rug(data = data_df, mapping = aes(x = raw, y = NULL),
+           sides = "b") +
+  geom_point(data = data_df, mapping = aes(x = raw, y = p.resid)) +
+  geom_ribbon(aes(ymin = fit - se, ymax = fit + se, y = NULL),
+              alpha = 0.3) +
+  geom_line() +
+  labs(x = p_obj$xlab, y = p_obj$ylab)
+```
+
+#représentation2
+
+```{r}
+modok <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=1) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), method = "REML", data = test)
+
+
+newdat <- expand.grid(SPEI_har_pond = seq(-1.469, 1.76, 0.1),
+                      SEX = unique(test$SEX),
+                      CHICKAGE = unique(test$CHICKAGE))
+library(stats)
+newdat$logit_pred <- predict(modok, newdata = newdat, type = "link", se.fit = TRUE)$fit
+newdat$logit_SE <- predict(modok, newdata = newdat, type = "link", se.fit = TRUE)$se.fit
+cmult <- 1.96  # Pour un intervalle de confiance de 95%
+newdat$logit_SE_lower <- newdat$logit_pred - cmult * newdat$logit_SE
+newdat$logit_SE_upper <- newdat$logit_pred + cmult * newdat$logit_SE
+
+# Transformer les prédictions et les intervalles de confiance en probabilités
+newdat$prob_pred <- plogis(newdat$logit_pred)
+newdat$prob_SE_lower <- plogis(newdat$logit_SE_lower)
+newdat$prob_SE_upper <- plogis(newdat$logit_SE_upper)
+
+
+g0 <- ggplot(newdat, aes(x = SPEI_har_pond, y = prob_pred, colour = SEX)) + 
+  geom_line() +
+  geom_point(data = test, aes(x = SPEI_har_pond, y = prop_foraging, col = SEX)) +
+  geom_ribbon(aes(ymin = prob_SE_lower, ymax = prob_SE_upper, fill = SEX), alpha = 0.1) +
+  facet_wrap(~ CHICKAGE, scales = "fixed", ncol = 2) +
+  scale_color_manual(values = c("darkred", "deepskyblue4")) +  # Les lignes noires pour les deux groupes
+  scale_fill_manual(values = c("M" = "deepskyblue", "F" = "red")) + # Facetter par CHICKAGE avec échelles Y fixes
+  theme_classic() +
+  labs(x = "SPEI", y = "Foraging proportion per month") +  # Adapté à votre modèle
+  theme(
+    axis.text.x = element_text(size = 16),  # Increase size of x-axis text
+    axis.text.y = element_text(size = 16),  # Increase size of y-axis text
+    axis.title.x = element_text(size = 18), # Increase size of x-axis title
+    axis.title.y = element_text(size = 18), # Increase size of y-axis title
+    strip.text = element_blank(),
+    legend.position = "none" # Remove facet labels
+  )
+
+```
+
+#Test sans le smois incomplets
+```{r}
+id_30_to_delete <- c("190657_2021_2", "190665_2020_1", "200015_2020_1")
+test1 <-  test[!(test$id_30 %in% id_30_to_delete), ]
+ratio1 <- ratio[-c(12,31,45),]
+
+modok <- gamm(ratio1 ~ s(SPEI_har_pond, bs = "cr", k=3) + SEX + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1),family = binomial(link = "logit"), method = "REML", data = test1)
+AICc(modok)# 750.1146
+coef(modok$gam)
+ # (Intercept)               SEXM          CHICKAGE1 s(SPEI_har_pond).1 s(SPEI_har_pond).2 
+ #      -0.385952979       -0.305170152        0.554848066       -0.002099001       -0.147879233 
+summary(modok$gam)
+summary(modok$gam)$p.table
+summary(modok$gam)$s.table
+VarCorr(modok$lme)
+summary(modok$lme)
+```
+
+
+##GLMM
+```{r}
+#SPEI
+modglm <- glmer(ratio~  SPEI_har_pond + SEX + CHICKAGE +
+                  (1|POP/device) + (1|PRODUCTION_envol), family = binomial(link = "logit"), data = test, na.action = na.fail)
+AICc(modglm)#1297.616
+
+#Re-check the factors
+#whithout SEX
+modglm1 <- glmer(ratio~    SPEI_har_pond +  CHICKAGE +
+                  (1|POP/device) + (1|PRODUCTION_envol), family = binomial(link = "logit"),data = test, na.action = na.fail)
+AICc(modglm1) #  1305.035
+
+#whithout CHICKAGE
+modglm2 <- glmer(ratio~  SPEI_har_pond +SEX +
+                  (1|POP/device) + (1|PRODUCTION_envol), family = binomial(link = "logit"),data = test, na.action = na.fail)
+AICc(modglm2) #2660.24 keep them both
+
+#  Les résidus ne sont pas surdispersés ?
+# que leur variance n’est pas plus grande que celle admise par le modèle ?
+#overdisp.glmer(modglm2) #surdispersé
+
+########################
+
+#SPEI²
+test$SPEI_har_sq <- test$SPEI_har_pond^2
+
+modglm <- glmer(ratio~ SPEI_har_sq + SEX + CHICKAGE +
+                  (1|POP/device) + (1|PRODUCTION_envol),family = binomial(link = "logit"), data = test, na.action = na.fail)
+AICc(modglm) #1365.075 not better
+
+########################
+
+#SPEI AND SPEI² (polynomial function)
+modglm <- glmer(ratio~ SPEI_har_sq + SPEI_har_pond + SEX + CHICKAGE +
+                  (1|POP/device) + (1|PRODUCTION_envol),family = binomial(link = "logit"), data = test, na.action = na.fail)
+AICc(modglm) #1297.281 not better
+
+#Standardized residuals vs predicted values: if random distribution = ok
+plot(modglm, which = 1) #ok
+
+```
+
+### Model validation: assumption checking
+
+```{r}
+#selected model
+#REML = T for model validation (provides less biased estimates of the variance components)
+modok <- glmer(ratio~ SPEI_har_pond+ I(SPEI_har_pond^3) + SEX + CHICKAGE +
+                  (1|POP/device) + (1|PRODUCTION_envol),family = binomial(link = "logit"), data = test, na.action = na.fail)
+AICc(modok)#1294.719
+
+#residuals (normality and independance)
+qqnorm(resid(modok))
+qqline(resid(modok)) #ok for residuals normality
+#idem
+hist(residuals(modok))
+
+# residuals vs fitted (homoscedasticity)
+plot(residuals(modok)~fitted(modok)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok for independance: no pattern
+
+
+#residuals against factors (relationship linearity and variance equality)
+plot(residuals(modok)~ test$CHICKAGE,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "Chick age",
+         main = "")
+abline(h = 0)
+
+plot(residuals(modok)~ test$SEX,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "SEX",
+         main = "")
+abline(h = 0)
+
+
+plot(residuals(modok)~ test$SPEI_har_pond,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "SPEI_har_pond",
+         main = "")
+abline(h = 0)
+
+
+plot(Effect("SPEI_har_pond",modok,partial.residuals=TRUE))
+
+#Multicolinearity
+vif(modok)
+
+#marginal and conditional R-squared values 
+r.squaredGLMM(modok)
+#                   R2m      R2c
+# theoretical 0.6417333 0.979656
+# delta       0.6386309 0.974920
+
+BIC(modok)
+
+#IConfidence interval (95%) for each variable
+# confint(modok, oldNames=FALSE)
+
+#Homoscedasticity Breusch-Pagan test
+# Model residuals
+residus <- resid(modok)
+# bptest(resid)
+
+#Regression residuals - variables
+lm_resid <- lm(residus^2 ~ SPEI_har_pond + SEX + CHICKAGE, data = test)
+
+# Effectuer le test Breusch-Pagan
+bptest(lm_resid)
+#ok !
+
+summary(modok)
+#               Estimate Std. Error z value Pr(>|z|)    
+# (Intercept)   -0.32534    0.09185  -3.542 0.000397 ***
+# SPEI_har_pond -0.06664    0.01037  -6.426 1.31e-10 ***
+# SEXM          -0.33733    0.09199  -3.667 0.000245 ***
+# CHICKAGE2      0.52366    0.01553  33.718  < 2e-16 ***
+
+
+
+###################################
+
+#selected model
+#REML = T for model validation (provides less biased estimates of the variance components)
+modok <- glmer(ratio~ SPEI_har_sq + SPEI_har_pond + SEX + CHICKAGE +
+                  (1|POP/device) + (1|PRODUCTION_envol),family = binomial(link = "logit"), data = test, na.action = na.fail)
+
+#residuals (normality and independance)
+qqnorm(resid(modok))
+qqline(resid(modok)) #ok for residuals normality
+#idem
+hist(residuals(modok))
+
+# residuals vs fitted (homoscedasticity)
+plot(residuals(modok)~fitted(modok)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok for independance: no pattern
+
+
+#residuals against factors (relationship linearity and variance equality)
+plot(residuals(modok)~ test$CHICKAGE,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "Chick age",
+         main = "")
+abline(h = 0)
+
+plot(residuals(modok)~ test$SEX,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "SEX",
+         main = "")
+abline(h = 0)
+
+
+plot(residuals(modok)~ test$SPEI_har_pond,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "SPEI_har_pond",
+         main = "")
+abline(h = 0)
+
+plot(residuals(modok)~ test$SPEI_har_sq,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "SPEI_har_sq",
+         main = "")
+abline(h = 0)
+
+
+plot(Effect("SPEI_har_pond",modok,partial.residuals=TRUE))
+plot(Effect("SPEI_har_sq",modok,partial.residuals=TRUE))
+
+#Multicolinearity
+vif(modok)
+  # SPEI_har_sq SPEI_har_pond           SEX      CHICKAGE 
+  #    1.021550      1.104682      1.001068      1.082415 
+     
+#marginal and conditional R-squared values 
+r.squaredGLMM(modok)
+#                   R2m       R2c
+# theoretical 0.6538248 0.9808269
+# delta       0.6508451 0.9763569
+
+#IConfidence interval (95%) for each variable
+# confint(modok, oldNames=FALSE)
+
+#Homoscedasticity Breusch-Pagan test
+# Model residuals
+residus <- resid(modok)
+# bptest(resid)
+
+#Regression residuals - variables
+lm_resid <- lm(residus^2 ~ SPEI_har_pond + SPEI_har_sq + SEX + CHICKAGE, data = test)
+
+# Effectuer le test Breusch-Pagan
+bptest(lm_resid)
+#ok !
+
+lm_resid <- lm(residus^2 ~ SPEI_har_sq + SEX + CHICKAGE, data = test)
+
+# Effectuer le test Breusch-Pagan
+bptest(lm_resid)
+#ok !
+
+summary(modok)
+#               Estimate Std. Error z value Pr(>|z|)    
+# (Intercept)   -0.39783    0.09512  -4.183 2.88e-05 ***
+# SPEI_har_sq    0.07912    0.00948   8.346  < 2e-16 ***
+# SPEI_har_pond -0.07913    0.01047  -7.559 4.05e-14 ***
+# SEXM          -0.32460    0.09864  -3.291 0.000999 ***
+# CHICKAGE2      0.51969    0.01554  33.431  < 2e-16 ***
+
+```
+
+
+
+
+
+# Test relation quadratique
+```{r}
+#With the quadratic variable
+# The I() function ensures that the enclosed mathematical operation 
+# is correctly interpreted as part of the model specification
+modok <- glmer(ratio~ SPEI_har_pond + I(SPEI_har_pond^2) + SEX + CHICKAGE +
+                  (1|POP/device) + (1|PRODUCTION_envol),family = binomial(link = "logit"), data = test, na.action = na.fail)
+
+AICc(modok) #1297.281
+r.squaredGLMM(modok)
+#                   R2m       R2c
+# theoretical 0.6538315 0.9808270
+# delta       0.6508517 0.9763571
+vif(modok)
+    # SPEI_har_pond I(SPEI_har_pond^2)                SEX           CHICKAGE 
+    #       1.104682           1.021550           1.001068           1.082415 
+plot(Effect("SPEI_har_pond",modok,partial.residuals=TRUE))
+
+library(sjPlot)
+plot_model(modok, type = "pred", terms = "SPEI_har_pond[all]", ci.lvl = 0.95) +
+  labs(title = "Polynomial Effect of SPEI_har_pond on Ratio",
+       x = "SPEI_har_pond",
+       y = "Predicted Ratio") +
+  theme_minimal()
+
+
+# Extract model predictions
+test$predicted <- predict(modok, type = "response")
+
+
+# Plot using ggplot2
+ggplot(test, aes(x = SPEI_har_pond, y = predicted)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = TRUE, color = "blue") +
+  labs(title = "Polynomial Effect of SPEI_har_pond on Ratio",
+       x = "SPEI_har_pond",
+       y = "Predicted Ratio") +
+  theme_minimal()
+```
+
+#######################
+
+#Test cubic variable
+
+```{r}
+#With the quadratic variable
+# The I() function ensures that the enclosed mathematical operation 
+# is correctly interpreted as part of the model specification
+modok <- glmer(ratio~ SPEI_har_pond + I(SPEI_har_pond^2) + I(SPEI_har_pond^3)  + SEX + CHICKAGE +
+                  (1|POP/device) + (1|PRODUCTION_envol),family = binomial(link = "logit"), data = test, na.action = na.fail)
+
+AICc(modok) #1296.299
+plot(Effect("SPEI_har_pond",modok,partial.residuals=TRUE))
+
+plot_model(modok, type = "pred", terms = "SPEI_har_pond[all]", ci.lvl = 0.95) +
+  labs(title = "Polynomial Effect of SPEI_har_pond on Ratio",
+       x = "SPEI_har_pond",
+       y = "Predicted Ratio") +
+  theme_minimal()
+
+
+# Extract model predictions
+test$predicted <- predict(modok, type = "response")
+
+
+# Plot using ggplot2
+ggplot(test, aes(x = SPEI_har_pond, y = predicted)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 3), se = TRUE, color = "blue") +
+  labs(title = "Polynomial Effect of SPEI_har_pond on Ratio",
+       x = "SPEI_har_pond",
+       y = "Predicted Ratio") +
+  theme_minimal()
+#################
+#terme cubique seul avec SPEI ?
+
+modok <- glmer(ratio~ SPEI_har_pond+ I(SPEI_har_pond^3)  + SEX + CHICKAGE +
+                  (1|POP/device) + (1|PRODUCTION_envol),family = binomial(link = "logit"), data = test, na.action = na.fail)
+AICc(modok)#1294.719
+BIC(modok)
+
+```
+#Test quartic
+
+```{r}
+#With the quadratic variable
+# The I() function ensures that the enclosed mathematical operation 
+# is correctly interpreted as part of the model specification
+modok <- glmer(ratio~ SPEI_har_pond + I(SPEI_har_pond^2) + I(SPEI_har_pond^3) + I(SPEI_har_pond^4)  + SEX + CHICKAGE +
+                  (1|POP/device) + (1|PRODUCTION_envol),family = binomial(link = "logit"), data = test, na.action = na.fail)
+
+AICc(modok) #1237.239
+plot(Effect("SPEI_har_pond",modok,partial.residuals=TRUE, confidence.level = 0.95))
+
+plot_model(modok, type = "pred", terms = "SPEI_har_pond[all]", ci.lvl = 0.95) +
+  labs(title = "Polynomial Effect of SPEI_har_pond on Ratio",
+       x = "SPEI_har_pond",
+       y = "Predicted Ratio") +
+  theme_minimal()
+
+
+# Extract model predictions
+test$predicted <- predict(modok, type = "response")
+
+
+# Plot using ggplot2
+ggplot(test, aes(x = SPEI_har_pond, y = predicted)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 4), se = TRUE, color = "blue") +
+  labs(title = "Polynomial Effect of SPEI_har_pond on Ratio",
+       x = "SPEI_har_pond",
+       y = "Predicted Ratio") +
+  theme_minimal()
+#################
+```
+
+
+
+
+

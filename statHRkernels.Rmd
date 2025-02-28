@@ -1,0 +1,881 @@
+---
+title: "HRkernel"
+output: html_document
+date: "2024-05-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+
+```{r, message= FALSE, warning=FALSE}
+library(dplyr)
+library(corrplot)
+library(lme4) # for lmer
+library(nlme) #for gls (glmm)
+library(lmerTest)
+library(Matrix) 
+library(MuMIn) # for Dredge()
+library(car) # for vif()
+library(lubridate)
+library(GGally) #correlation synthese
+library(mgcv) #for gam
+library(lmtest) #Breusch-Pagan test
+library(effects)
+library(flexmix) #for BIC extraction
+library(performance) #R²
+library(gridExtra)#grid.arrange
+```
+
+#Load data \## Prepare DATA
+
+```{r}
+data1 <-
+  read.table(
+    "D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Scripts_current/Analyses_stats/matrice_ciccic_2025HR.txt",
+    header = T,
+    dec = ","
+  )
+#79 periods
+
+colnames(data1)[colnames(data1) == "SEXE"] <- "SEX"
+colnames(data1)[colnames(data1) == "Hrker_foraging_hadjust"] <- "HR_ker95ha"
+
+data <-
+  data1[, c(
+    "device",
+    "ID",
+    "id_30",
+    "Deviceyear",
+    "HR_ker95ha",
+    "POP",
+    "SEX",
+    "PRODUCTION_envol",
+    "CHICKAGE",
+    "SPEI_har_pond"
+  )]
+
+
+#Convert into the good type
+data <- data %>%
+  mutate(across(c(POP, SEX, PRODUCTION_envol, CHICKAGE, id_30, device), as.factor))
+data$SPEI_har_pond <- as.numeric(data$SPEI_har_pond)
+data$HR_ker95ha <- as.numeric(data$HR_ker95ha)
+
+#no scaling
+
+table(data$PRODUCTION_envol)
+# Only one individual has 5 chicks :add it to the 4+ class
+data$PRODUCTION_envol <-
+  ifelse(
+    data$PRODUCTION_envol == 4 |
+      data$PRODUCTION_envol == 5,
+    "4+",
+    as.character(data$PRODUCTION_envol)
+  )
+data$PRODUCTION_envol <- as.factor(data$PRODUCTION_envol)
+summary(data)
+```
+
+# HR size KER95
+
+#How to explain the monthly size of the home range calculated with KERNELS 95%?
+
+### Prepare data
+
+```{r}
+test <- data
+#Check for missing values
+colSums(is.na(test))
+
+#Y distribution
+
+par(mfrow=c(2,2))
+# Boxplot
+boxplot(test$HR_ker95ha,col='blue',ylab='Monthly home range size (Ker95)')
+# Cleveland plot
+dotchart(test$HR_ker95ha,pch=16,col='blue',xlab='Monthly home range size (Ker95)')
+# Histogram
+hist(test$HR_ker95ha,col='blue',xlab="Monthly home range size (Ker95)",main="")
+# Quantile-Quantile plot
+qqnorm(test$HR_ker95ha,pch=16,col='blue',xlab='')
+qqline(test$HR_ker95ha,col='red')
+# Non normal
+shapiro.test(test$HR_ker95ha) #W = 0.58959, p-value = 1.588e-13 Non normal law (chi2 ? Gamma ?)
+##Outlier
+```
+
+### Potential relationships between Xs and Y
+
+```{r}
+par(mfrow=c(1,4))
+
+# SPEI
+plot(test$HR_ker95ha~test$SPEI_har_pond,pch=16,col='blue',xlab='SPEI',ylab='HR95 Kernel')
+
+# Production
+boxplot(HR_ker95ha ~ PRODUCTION_envol, data = test, main = "HR95 Kernel")
+# sex
+boxplot(HR_ker95ha ~ SEX, data = test, col = c('blue3','red2'), main = "HR95 Kernel")
+# Chick age
+boxplot(HR_ker95ha ~ CHICKAGE, data = test, col = c('blue3','red2'), main = "HR95 Kernel")
+```
+
+Outlier ! Monthly foraging HR area (ha) KER95: decreases with the number of chicks, increases in males, increases with the chick age
+
+### Choice of the random factors
+
+```{r}
+#LM, constant model
+mod <- lm(HR_ker95ha ~1, data = test)
+AICc(mod)
+summary(mod)
+
+#LMM
+mod1 <- lmer(HR_ker95ha ~(1|POP/device), data = test)
+AICc(mod1)# 
+mod2 <- lmer(HR_ker95ha ~(1|POP/device) + (1|PRODUCTION_envol), data = test)
+AICc(mod2) ## !
+mod3 <- lmer(HR_ker95ha ~(1|PRODUCTION_envol), data = test)
+AICc(mod3)
+mod4 <- lmer(HR_ker95ha ~(1|device), data = test)
+AICc(mod4)
+mod5 <- lmer(HR_ker95ha ~(1|device) + (1|POP), data = test)
+AICc(mod5)# 
+mod6 <- lmer(HR_ker95ha ~ (1|POP), data = test)
+AICc(mod6)# 
+mod7 <- lmer(HR_ker95ha ~ (1|PRODUCTION_envol) +(1|device), data = test)
+AICc(mod7)#1521.429
+
+#Compare AICc
+model_list <- list(mod, mod1, mod2, mod3, mod4, mod5, mod6, mod7)
+aiccs <- sapply(model_list, AICc)
+aiccs
+best_model <- model_list[[which.min(aiccs)]] 
+best_model #(1 | PRODUCTION_envol) et (1 | device) égalité
+#Compare BIC
+model_list <- list(mod, mod1, mod2, mod3, mod4, mod5, mod6)
+bics <- sapply(model_list, BIC)
+bics
+best_model <- model_list[[which.min(bics)]]
+best_model 
+```
+
+### GAMM with the complete model: linearity of the relationship?
+
+```{r}
+#remove cumul and SPI (colinear variables)
+modgam <- gamm(HR_ker95ha~ s(SPEI_har_pond) + SEX + 
+                 CHICKAGE, random = list(device = ~1), data = test)
+summary(modgam$gam)
+AICc(modgam)#  1538.24
+
+#remove SEX
+modgam <- gamm(HR_ker95ha~  s(SPEI_har_pond) + CHICKAGE, random = list(device = ~1), data = test)
+AICc(modgam) # 1536.883 ok remove
+
+#remove chick age
+modgam <- gamm(HR_ker95ha~  s(SPEI_har_pond) + SEX, random = list(device = ~1), data = test)
+AICc(modgam) #1538.428 remove
+
+#only SPEI
+modgam <- gamm(HR_ker95ha~  s(SPEI_har_pond), random = list(device = ~1), data = test)
+AICc(modgam) #1536.939 ok
+
+#only sex
+modgam <- gamm(HR_ker95ha~ SEX, random = list(device = ~1), data = test)
+AICc(modgam)# 1535.968 ok
+
+#only chick age
+modgam <- gamm(HR_ker95ha~ CHICKAGE, random = list(device = ~1), data = test)
+AICc(modgam)#1534.304 ok
+
+#null model
+modgam <- gamm(HR_ker95ha~ 1, random = list(device = ~1), data = test)
+AICc(modgam)#1534.818 best
+
+####With Dredge to see if we find the same model
+modUgam <- uGamm(HR_ker95ha~ s(SPEI_har_pond) + SEX + 
+                 CHICKAGE, random = list(device = ~1), data = test)
+Dredge <- dredge(modUgam, trace = 2)
+Dredge
+modavg <- model.avg(Dredge, subset = delta<2)
+summary(modavg)
+#keep nothing then only SPEI
+
+modgam <- gamm(HR_ker95ha~  s(SPEI_har_pond) + SEX + 
+                 CHICKAGE, random = list(device = ~1), data = test)
+summary(modgam$gam)
+par(mfrow =c(2,2))
+plot(modgam$gam)
+
+ # Each plot represents the smoothed effect of a continuous variable on the response variable. 
+ # The solid line is the estimated effect, and the shaded areas represent the 95% confidence intervals.
+summary(modgam$lme)
+
+```
+
+Linear relationship for SPEI --\> LMM
+
+### LMM model: selection 
+
+```{r,results='hide',fig.keep='all'}
+modglm <- lmer(HR_ker95ha~  SPEI_har_pond + SEX + CHICKAGE +
+                 (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm) #1535.829
+
+#remove SEX
+modglm <- lmer(HR_ker95ha~  SPEI_har_pond+ CHICKAGE +
+                  (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm)# 1534.538 better
+
+#remove chick age
+modglm <- lmer(HR_ker95ha~  SPEI_har_pond + SEX +
+                  (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm)#1536.113 <2 so remove it
+
+#only SPEI
+modglm <- lmer(HR_ker95ha~  SPEI_har_pond +
+                  (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm)#1534.933 best
+
+#only chick age
+modglm <- lmer(HR_ker95ha~  CHICKAGE +
+                  (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm)#1534.304 equal best
+
+#only sex
+modglm <- lmer(HR_ker95ha~  SEX +
+                  (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm)#1535.968 equal best
+
+#NUL model
+modglm <- lmer(HR_ker95ha~  1 +
+                  (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm)#1534.818 more parcimonious
+
+modglm <- lmer(HR_ker95ha~  SPEI_har_pond + SEX + CHICKAGE +
+                  (1|device), data = test, REML = F, na.action = na.fail)
+```
+
+### Model validation
+
+```{r}
+
+modok<- lmer(HR_ker95ha~  1+
+                 (1|device), data = test, REML = T, na.action = na.fail)
+#residuals (normality and independance)
+qqnorm(resid(modok))
+qqline(resid(modok)) #ok for residuals normality
+#idem
+hist(residuals(modok))
+
+# residuals vs fitted (homoscedasticity)
+plot(residuals(modok)~fitted(modok)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#Heteroscedasticity !
+
+
+#marginal and conditional R-squared values 
+r.squaredGLMM(modok)
+#     R2m       R2c
+# [1,]   0 0.1066168
+
+#IConfidence interval (95%) for each variable
+confint(modok, oldNames=FALSE)
+
+BIC(modok)
+
+#Homoscedasticity Breusch-Pagan test
+# Model residuals
+residus <- resid(modok)
+# bptest(resid)
+
+#Regression residuals - variables
+lm_resid <- lm(residus^2 ~ SPEI_har_pond + SEX + CHICKAGE, data = test)
+
+# Effectuer le test Breusch-Pagan
+bptest(lm_resid)
+#ok !
+
+summary(modok)
+```
+
+# LOG TRANSFORMATION
+
+### LOG Y distribution
+
+```{r}
+
+#log transformation needed
+test$HR_ker95ha_log <- log(test$HR_ker95ha)
+
+par(mfrow=c(2,2))
+# Boxplot
+boxplot(test$HR_ker95ha_log,col='blue',ylab='Monthly home range size (Ker95)')
+# Cleveland plot
+dotchart(test$HR_ker95ha_log,pch=16,col='blue',xlab='Monthly home range size (Ker95)')
+# Histogram
+hist(test$HR_ker95ha_log,col='blue',xlab="Monthly home range size (Ker95)",main="")
+# Quantile-Quantile plot
+qqnorm(test$HR_ker95ha_log,pch=16,col='blue',xlab='')
+qqline(test$HR_ker95ha_log,col='red')
+# Non normal
+shapiro.test(test$HR_ker95ha_log)#W = 0.97224, p-value = 0.082437 normal distribution
+##it has removed the outlier
+```
+
+### LOG Potential relationships between Xs and Y
+
+```{r}
+par(mfrow=c(1,4))
+
+# SPEI
+plot(test$HR_ker95ha_log~test$SPEI_har_pond,pch=16,col='blue',xlab='SPEI',ylab='HR95 Kernel')
+
+# Production
+boxplot(HR_ker95ha_log ~ PRODUCTION_envol, data = test, main = "HR95 Kernel")
+# sex
+boxplot(HR_ker95ha_log ~ SEX, data = test, col = c('blue3','red2'), main = "HR95 Kernel")
+# Chick age
+boxplot(HR_ker95ha_log ~ CHICKAGE, data = test, col = c('blue3','red2'), main = "HR95 Kernel")
+```
+
+Monthly foraging HR area (ha) KER95: decreases with the number of chicks, increases in males, increases with the chick age ?
+
+### LOG Choice of the random factors
+
+```{r}
+#LM, constant model
+mod <- lm(HR_ker95ha_log ~1, data = test)
+AICc(mod) #284.4093
+
+#LMM
+mod1 <- lmer(HR_ker95ha_log ~(1|POP/device), data = test)
+AICc(mod1)#270.5984
+mod2 <- lmer(HR_ker95ha_log ~(1|POP/device) + (1|PRODUCTION_envol), data = test)
+AICc(mod2) #270.2355
+mod3 <- lmer(HR_ker95ha_log ~(1|PRODUCTION_envol), data = test)
+AICc(mod3)#283.9424
+mod4 <- lmer(HR_ker95ha_log ~(1|device), data = test)
+AICc(mod4)#270.6412 more parcimonious
+mod5 <- lmer(HR_ker95ha_log ~(1|device) + (1|POP), data = test)
+AICc(mod5)#270.5984
+mod6 <- lmer(HR_ker95ha_log ~ (1|POP), data = test)
+AICc(mod6)#283.3106
+mod7 <- lmer(HR_ker95ha_log ~ (1|device) + (1|PRODUCTION_envol), data = test)
+AICc(mod7)#271.1135
+
+#Compare AICc
+model_list <- list(mod, mod1, mod2, mod3, mod4, mod5, mod6, mod7)
+aiccs <- sapply(model_list, AICc)
+aiccs #284.4093 270.5984 270.2355 283.9424 270.6412 270.5984 283.3106 271.1135
+best_model <- model_list[[which.min(aiccs)]] 
+best_model #HR_ker95ha_log ~ (1 | POP/device) + (1 | PRODUCTION_envol)
+#but delta AICc <2 with (1|device); more parsimonious
+
+
+#Compare BIC
+model_list <- list(mod, mod1, mod2, mod3, mod4, mod5, mod6)
+bics <- sapply(model_list, BIC)
+bics #1537.821 1531.654 1534.605 1526.525 1527.310 1531.654 1528.161
+best_model <- model_list[[which.min(bics)]]
+best_model 
+```
+
+### LOG GAMM with the complete model: linearity of the relationship?
+
+```{r}
+#remove cumul and SPI (colinear variables)
+modgam <- gamm(HR_ker95ha_log~ s(SPEI_har_pond)+ SEX + 
+                 CHICKAGE, random = list(device = ~1), data = test)
+summary(modgam$gam)
+AICc(modgam)#271.738
+
+#remove SEX
+modgam <- gamm(HR_ker95ha_log~  s(SPEI_har_pond) + CHICKAGE,random = list(device = ~1), data = test)
+AICc(modgam) #271.0271, delta AICc <2 remove it
+
+#remove chick age
+modgam <- gamm(HR_ker95ha_log~  s(SPEI_har_pond) + SEX,random = list(device = ~1), data = test)
+AICc(modgam) # 270.22367 idem
+
+modgam <- gamm(HR_ker95ha_log~  s(SPEI_har_pond),random = list(device = ~1), data = test)
+AICc(modgam)#269.6364
+
+#juste chickage
+modgam <- gamm(HR_ker95ha_log~ CHICKAGE,random = list(device = ~1), data = test)
+AICc(modgam)#270.8623 ok
+#juste sex
+modgam <- gamm(HR_ker95ha_log~ SEX,random = list(device = ~1), data = test)
+AICc(modgam) #270.3029
+#null
+modgam <- gamm(HR_ker95ha_log~ 1,random = list(device = ~1), data = test)
+AICc(modgam)#269.6958
+
+summary(modgam$gam)
+par(mfrow =c(2,2))
+# plot(modgam$gam)
+
+ # Each plot represents the smoothed effect of a continuous variable on the response variable. 
+ # The solid line is the estimated effect, and the shaded areas represent the 95% confidence intervals.
+summary(modgam$lme)
+
+```
+Not a complex relationship : LMM
+
+### LMM model: selection (automated)
+
+```{r,fig.keep='all'}
+modglm <- lmer(HR_ker95ha_log~  SPEI_har_pond + SEX + CHICKAGE +
+                (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm) #269.3272
+r.squaredGLMM(modglm)
+
+#remove SEX
+modglm <- lmer(HR_ker95ha_log~  SPEI_har_pond + CHICKAGE +
+                 (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm)# 268.6823 delta <2, remove it
+r.squaredGLMM(modglm)
+
+#only chick age
+modglm <- lmer(HR_ker95ha_log~  CHICKAGE +
+                 (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm)# 270.8623 better with SPEI
+r.squaredGLMM(modglm)
+
+#remove chick age
+modglm <- lmer(HR_ker95ha_log~   SPEI_har_pond  + SEX +
+                 (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm)#  267.8788 we can remove them (<2 AICc difference)
+r.squaredGLMM(modglm)
+
+#only sex
+modglm <- lmer(HR_ker95ha_log~ SEX +
+                 (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm) #270.3029 keep spei
+r.squaredGLMM(modglm)
+
+#only spei
+modglm <- lmer(HR_ker95ha_log~   SPEI_har_pond +
+                 (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm)#267.355 best model !
+r.squaredGLMM(modglm)
+
+#NULL
+modglm <- lmer(HR_ker95ha_log~  1 +
+                 (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm) #269.6958 no >2
+r.squaredGLMM(modglm)
+
+#SEX + CHICKAGE
+modglm <- lmer(HR_ker95ha_log~  SEX + CHICKAGE +
+                 (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm) #269.6958 no >2
+r.squaredGLMM(modglm)
+```
+Avec Dredge
+
+```{r}
+fullmod <- lmer(HR_ker95ha_log~  SPEI_har_pond + SEX + CHICKAGE +
+                (1|device), data = test, REML = F, na.action = na.fail)
+Dredge <- dredge(fullmod)
+
+#4 modèles en concurrence
+#Estimate nul pour ajout de SEX ?
+modglm <- lmer(HR_ker95ha_log~   SPEI_har_pond  + SEX +
+                 (1|device), data = test, REML = T, na.action = na.fail)
+confint(modglm, oldNames=FALSE) #CHICKAGE ESTIMATE NULL
+summary(modglm)
+
+modglm <- lmer(HR_ker95ha_log~   SPEI_har_pond  + CHICKAGE +
+                 (1|device), data = test, REML = T, na.action = na.fail)
+confint(modglm, oldNames=FALSE) #CHICKAGE ESTIMATE NULL
+summary(modglm)
+
+modglm <- lmer(HR_ker95ha_log~   SPEI_har_pond  + SEX + CHICKAGE +
+                 (1|device), data = test, REML = T, na.action = na.fail)
+confint(modglm, oldNames=FALSE) #CHICKAGE ESTIMATE NULL
+summary(modglm)
+
+
+```
+
+### Model validation
+
+```{r}
+modok<-lmer(HR_ker95ha_log~   SPEI_har_pond +
+                 (1|device), data = test, REML = T, na.action = na.fail)
+#residuals (normality and independance)
+qqnorm(resid(modok))
+qqline(resid(modok)) #ok for residuals normality
+#idem
+hist(residuals(modok))
+
+# residuals vs fitted (homoscedasticity)
+plot(residuals(modok)~fitted(modok)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok for independance: no pattern
+
+
+plot(residuals(modok)~ test$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+plot(Effect("SPEI_har_pond",modok,partial.residuals=TRUE))
+
+#Multicolinearity
+#vif(modok)
+
+#marginal and conditional R-squared values 
+r.squaredGLMM(modok)
+#0.03575086 0.6206183
+
+#IConfidence interval (95%) for each variable
+confint(modok, oldNames=FALSE)
+
+BIC(modok) #272.5188
+
+#Homoscedasticity Breusch-Pagan test
+# Model residuals
+residus <- resid(modok)
+# bptest(resid)
+
+#Regression residuals - variables
+lm_resid <- lm(residus^2 ~ SPEI_har_pond + SEX + CHICKAGE, data = test)
+
+# Effectuer le test Breusch-Pagan
+bptest(lm_resid)
+#ok !
+
+summary(modok)
+# Linear mixed model fit by REML. t-tests use Satterthwaite's method ['lmerModLmerTest']
+# Formula: HR_ker95ha_log ~ SPEI_har_pond + (1 | device)
+#    Data: test
+# 
+# REML criterion at convergence: 261.4
+# 
+# Scaled residuals: 
+#     Min      1Q  Median      3Q     Max 
+# -2.9377 -0.6061 -0.1804  0.4196  2.9654 
+# 
+# Random effects:
+#  Groups   Name        Variance Std.Dev.
+#  device   (Intercept) 0.954    0.9767  
+#  Residual             1.110    1.0538  
+# Number of obs: 79, groups:  device, 21
+# 
+# Fixed effects:
+#               Estimate Std. Error      df t value Pr(>|t|)    
+# (Intercept)     6.6887     0.2515 19.9581  26.598   <2e-16 ***
+# SPEI_har_pond  -0.3755     0.1741 66.5096  -2.157   0.0346 *
+```
+
+Conclusion: the area of HR95
+- decreases when SPEI increases (wetter conditions)
+
+### Model validation without the incomplete months (<21j)
+
+```{r}
+id_30_to_delete <- c("190657_2021_2", "190665_2020_1", "200015_2020_1")
+test1 <-  test[!(test$id_30 %in% id_30_to_delete), ]
+
+
+modok<- lmer(HR_ker95ha_log~   SPEI_har_pond +
+                 (1|device), data = test1, REML = T, na.action = na.fail)
+
+#residuals (normality and independance)
+qqnorm(resid(modok))
+qqline(resid(modok)) #ok for residuals normality
+#idem
+hist(residuals(modok))
+
+# residuals vs fitted (homoscedasticity)
+plot(residuals(modok)~fitted(modok)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok for independance: no pattern
+
+
+#residuals against factors (relationship linearity and variance equality)
+plot(residuals(modok)~ test1$CHICKAGE,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "Chick age",
+         main = "")
+abline(h = 0)
+
+plot(residuals(modok)~ test1$SEX,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "SEX",
+         main = "")
+abline(h = 0)
+
+
+#marginal and conditional R-squared values
+r.squaredGLMM(modok)
+#0.036097 0.4642835
+
+#IConfidence interval (95%) for each variable
+confint(modok, oldNames=FALSE)
+
+BIC(modok)
+
+#Homoscedasticity Breusch-Pagan test
+# Model residuals
+residus <- resid(modok)
+# bptest(resid)
+
+#Regression residuals - variables
+lm_resid <- lm(residus^2 ~ SPEI_har_pond + SEX + CHICKAGE, data = test1)
+
+# Effectuer le test Breusch-Pagan
+bptest(lm_resid)
+#ok !
+
+summary(modok)
+#                         Estimate Std. Error      df t value Pr(>|t|)
+#              Estimate Std. Error      df t value Pr(>|t|)    
+# (Intercept)     6.6874     0.2525 19.8645  26.489   <2e-16 ***
+# SPEI_har_pond  -0.3795     0.1820 63.2988  -2.084   0.0412 * 
+```
+
+#Représentation 2
+
+```{r}
+modok<- lmer(HR_ker95ha_log~   SPEI_har_pond +
+                 (1|device), data = test, REML = T, na.action = na.fail)
+
+library(nlme)
+modok<-lme(HR_ker95ha_log~ SPEI_har_pond , 
+                 random = ~1|device, data = test, na.action = na.fail, method = "REML")
+
+
+
+newdat <- expand.grid(SPEI_har_pond=seq(-1.569,1.86,0.1))
+library(stats)
+newdat$pred <- stats::predict(modok, newdat, level = 0)
+
+Designmat <- model.matrix(formula(modok)[-2], newdat)
+predvar <- diag(Designmat %*% vcov(modok) %*% t(Designmat)) 
+newdat$SE <- sqrt(predvar) 
+newdat$SE2 <- sqrt(predvar+modok$sigma^2)
+
+cmult <- 1.96
+
+g0 <- ggplot(newdat, aes(x = SPEI_har_pond, y = pred)) + 
+  geom_line() +
+  geom_ribbon(aes(ymin = pred - cmult * SE, ymax = pred + cmult * SE), alpha = 0.1, fill = "deepskyblue") +
+  geom_point(data = test, aes(x = SPEI_har_pond, y = HR_ker95ha_log)) +
+  theme_classic() +
+  labs(x = "SPEI", y = "KDE95 (on foraging locations)") +
+  theme(
+    axis.text.x = element_text(size = 16),  # Increase size of x-axis text
+    axis.text.y = element_text(size = 16),  # Increase size of y-axis text
+    axis.title.x = element_text(size = 18), # Increase size of x-axis title
+    axis.title.y = element_text(size = 18), # Increase size of y-axis title
+    strip.text = element_blank()  # Remove facet labels
+  )
+
+
+
+
+
+# Générer le graphique
+g0 <- ggplot(newdat, aes(x = SPEI_har_pond, y = pred)) +
+  geom_line()
+
+# Ajouter les bandes d'incertitude
+cmult <- 1.96
+graph1 <- g0 +
+  geom_ribbon(aes(ymin = pred - cmult * SE, ymax = pred + cmult * SE), 
+              alpha = 0.1, linetype = 0, fill = "deepskyblue") +
+  geom_point(data = test, aes(x = SPEI_har_pond, y = HR_ker95ha_log)) +  # Utilisation cohérente de la variable
+  theme_classic() +
+  theme(axis.text.x = element_text(size = 12), 
+        axis.text.y = element_text(size = 12), 
+        axis.title.x = element_text(size = 14), 
+        axis.title.y = element_text(size = 14)) +
+  labs(x = "SPEI", y = "HR (log-transformed)")
+
+# Afficher le graphique
+print(graph1)
+
+```
+
+Correlation matrix of all Homr range methods
+
+```{r}
+data1 <-
+  read.table(
+    "D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Scripts_current/Analyses_stats/matrice_ciccic_2025HR.txt",
+    header = T,
+    dec = ","
+  )
+#79 periods
+
+colnames(data1)[colnames(data1) == "SEXE"] <- "SEX"
+colnames(data1)[colnames(data1) == "Hrker_foraging_hadjust"] <- "KDE95_foraging"
+colnames(data1)[colnames(data1) == "HRker95_allhadjust"] <- "KDE95_allbhv"
+colnames(data1)[colnames(data1) == "Hrneiglink_foraging"] <- "NeighbourClustering_foraging"
+
+data <-
+  data1[, c(
+    "KDE95_foraging",
+    "KDE95_allbhv",
+    "NeighbourClustering_foraging"
+  )]
+
+summary(data)
+
+#distribution
+dotchart(data$KDE95_foraging,pch=16,col='blue',xlab='')
+# Histogram
+hist(data$KDE95_foraging,col='blue',xlab="",main="")
+# Quantile-Quantile plot
+qqnorm(data$KDE95_foraging,pch=16,col='blue',xlab='')
+qqline(data$KDE95_foraging,col='red')
+# Non normal
+shapiro.test(data$KDE95_foraging) #W = 0.58959, p-value = 1.588e-13 Non normal
+
+
+#distribution
+dotchart(data$KDE95_allbhv,pch=16,col='blue',xlab='')
+# Histogram
+hist(data$KDE95_allbhv,col='blue',xlab="",main="")
+# Quantile-Quantile plot
+qqnorm(data$KDE95_allbhv,pch=16,col='blue',xlab='')
+qqline(data$KDE95_allbhv,col='red')
+# Non normal
+shapiro.test(data$KDE95_allbhv) #W = 0.34952, p-value < 2.2e-16 Non normal
+#No outlier
+
+
+#distribution
+dotchart(data$NeighbourClustering_foraging,pch=16,col='blue',xlab='')
+# Histogram
+hist(data$NeighbourClustering_foraging,col='blue',xlab="",main="")
+# Quantile-Quantile plot
+qqnorm(data$NeighbourClustering_foraging,pch=16,col='blue',xlab='')
+qqline(data$NeighbourClustering_foraging,col='red')
+# Non normal
+shapiro.test(data$NeighbourClustering_foraging) #W = 0.70345, p-value = 2.428e-11 Non normal
+#No outlier
+
+#Spearman's rho (denoted as rs) or Kendall's Tau.
+library(agricolae)
+cor <- correlation(data, method = c("spearman"))
+cor1 <- cor(data, method = "spearman")
+print(cor)
+print(cor1)
+corrplot(cor1, method = "shade", type = "upper", tl.col = "black",tl.srt = 45, addCoef.col = "white")
+```
+Trouver la pente entre all KDE95 all bhv et foraging
+```{r}
+reg_lin <- lm(data$KDE95_foraging~ data$KDE95_allbhv)
+plot(reg_lin)
+summary(reg_lin)
+
+plot(data$KDE95_foraging, data$KDE95_allbhv, main = "", xlab = "KDE foraging", ylab = "KDE all behaviours")
+abline(a = 0, b = 1, col = "red", lty = 2)
+abline(reg_lin, col = "red") # Pour la régression linéaire
+
+
+library(lmtest)
+bptest(reg_lin)
+cooks.distance(reg_lin)
+```
+
+Corrélation entre les descripteurs du foraging
+
+```{r}
+data1 <-
+  read.table(
+    "D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Scripts_current/Analyses_stats/matrice_ciccic_2025HR.txt",
+    header = T,
+    dec = ","
+  )
+#79 periods
+
+colnames(data1)[colnames(data1) == "SEXE"] <- "SEX"
+colnames(data1)[colnames(data1) == "Hrker_foraging_hadjust"] <- "HR_ker95ha"
+
+data <-
+  data1[, c(
+    "HR_ker95ha",
+    "Mean_nest_dist",
+    "prop_for_month",
+    "daily_mean_ODBA"
+  )]
+
+data$prop_for_month <- as.numeric(data$prop_for_month)
+data$HR_ker95ha <- as.numeric(data$HR_ker95ha)
+
+
+
+#distribution
+dotchart(data$HR_ker95ha,pch=16,col='blue',xlab='')
+# Histogram
+hist(data$HR_ker95ha,col='blue',xlab="",main="")
+# Quantile-Quantile plot
+qqnorm(data$HR_ker95ha,pch=16,col='blue',xlab='')
+qqline(data$HR_ker95ha,col='red')
+# Non normal
+shapiro.test(data$HR_ker95ha) #W = 0.58959, p-value = 1.588e-13 Non normal
+
+
+#distribution
+dotchart(data$Mean_nest_dist,pch=16,col='blue',xlab='')
+# Histogram
+hist(data$Mean_nest_dist,col='blue',xlab="",main="")
+# Quantile-Quantile plot
+qqnorm(data$Mean_nest_dist,pch=16,col='blue',xlab='')
+qqline(data$Mean_nest_dist,col='red')
+# Non normal
+shapiro.test(data$Mean_nest_dist) #W = 0.80189, p-value = 6.279e-09 Non normal
+#No outlier
+
+
+#distribution
+dotchart(data$prop_for_month,pch=16,col='blue',xlab='')
+# Histogram
+hist(data$prop_for_month,col='blue',xlab="",main="")
+# Quantile-Quantile plot
+qqnorm(data$prop_for_month,pch=16,col='blue',xlab='')
+qqline(data$prop_for_month,col='red')
+# Non normal
+shapiro.test(data$prop_for_month) #W = 0.97606, p-value = 0.1435 normal !
+#No outlier
+
+
+#distribution
+dotchart(data$daily_mean_ODBA,pch=16,col='blue',xlab='')
+# Histogram
+hist(data$daily_mean_ODBA,col='blue',xlab="",main="")
+# Quantile-Quantile plot
+qqnorm(data$daily_mean_ODBA,pch=16,col='blue',xlab='')
+qqline(data$daily_mean_ODBA,col='red')
+# Non normal
+shapiro.test(data$daily_mean_ODBA) #W = 0.96351, p-value = 0.02343 non normal
+#No outlier
+
+#Spearman's rho (denoted as rs) or Kendall's Tau.
+library(agricolae)
+cor <- correlation(data, method = c("spearman"))
+cor1 <- cor(data, method = "spearman")
+print(cor)
+print(cor1)
+corrplot(cor1, method = "color", type = "upper", 
+         tl.col = "black", tl.srt = 45, addCoef.col = "black")
+```
+

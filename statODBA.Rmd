@@ -1,0 +1,594 @@
+---
+title: "ODBA_model"
+output: html_document
+date: "2024-05-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+
+```{r, message= FALSE, warning=FALSE}
+library(dplyr)
+library(corrplot)
+library(lme4) # for lmer
+library(nlme) #for gls (glmm)
+library(lmerTest)
+library(Matrix) 
+library(MuMIn) # for Dredge()
+library(car) # for vif()
+library(lubridate)
+library(GGally) #correlation synthese
+library(mgcv) #for gam
+library(lmtest) #Breusch-Pagan test
+library(effects)
+library(flexmix) #for BIC extraction
+library(performance) #R²
+library(gridExtra)#drif.arrange
+```
+
+## Prepare DATA
+
+```{r}
+# data1 <- read.table("D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Scripts_current/Analyses_stats/breeder_all_ok.txt", header = T, dec = ",")
+# data <- data1[,c("device", "id", "Deviceyear",  "POP", "SEX", "daily_mean_ODBA", "PRODUCTION_envol", "CHICKAGE", "CUMUL_prcp_ann_pond", "SPEI_har_pond", "SPI_pond", "ecart_cumul_annuel_moyen")]
+
+data1 <-
+  read.table(
+    "D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Scripts_current/Analyses_stats/matrice_ciccic_2025_odba.txt",
+    header = T,
+    dec = ","
+  )
+#79 periods
+colnames(data1)[colnames(data1) == "SEXE"] <- "SEX"
+data1$daily_mean_ODBA <- data1$ODBA.mG.#ligne à retirer si voulu en G
+
+
+#Convert into the good type
+data1 <- data1 %>%
+  mutate(across(c(Deviceyear, id_30, POP, SEX, PRODUCTION_envol, CHICKAGE, device), as.factor))
+
+data1$SPEI_har_pond <- as.numeric(data1$SPEI_har_pond)
+#no need to scale
+data <- data1
+
+table(data$PRODUCTION_envol)
+# Only one individual has 5 chicks :add it to the 4+ class
+data$PRODUCTION_envol <- ifelse(data$PRODUCTION_envol == 4 | data$PRODUCTION_envol == 5, "4+", as.character(data$PRODUCTION_envol))
+data <- data %>%
+  mutate(across(c(POP, SEX, PRODUCTION_envol, CHICKAGE), as.factor)) %>%
+  mutate(across(c(SPEI_har_pond, daily_mean_ODBA), as.numeric))
+
+summary(data)
+```
+
+# Y distribution
+
+```{r}
+test <- data
+# test$daily_mean_ODBA1 <- test$daily_mean_ODBA
+# test$daily_mean_ODBA <- test$daily_mean_ODBA/1000 #en G au lieu de mG
+summary(test)
+test$daily_mean_ODBA_log <- log(test$daily_mean_ODBA)#si besoin
+
+#Check for missing values
+colSums(is.na(test))
+
+#Y distribution
+
+par(mfrow=c(2,2))
+# Boxplot
+boxplot(test$daily_mean_ODBA,col='blue',ylab='Monthly mean of the daily mean ODBA')
+# Cleveland plot
+dotchart(test$daily_mean_ODBA,pch=16,col='blue',xlab='Monthly mean of the daily mean ODBA')
+# Histogram
+hist(test$daily_mean_ODBA,col='blue',xlab="Monthly mean of the daily mean ODBA",main="")
+# Quantile-Quantile plot
+qqnorm(test$daily_mean_ODBA,pch=16,col='blue',xlab='')
+qqline(test$daily_mean_ODBA,col='red')
+# Non normal
+shapiro.test(test$daily_mean_ODBA) #W = 0.96351, p-value = 0.02343 Non normal law
+#No outlier
+```
+
+### Potential relationships between Xs and Y
+
+```{r}
+par(mfrow=c(1,4))
+
+#PRCP
+# SPEI
+plot(test$daily_mean_ODBA~test$SPEI_har_pond,pch=16,col='blue',xlab='SPEI',ylab='Monthly mean of the daily Odba')
+
+# Production
+boxplot(daily_mean_ODBA ~ PRODUCTION_envol, data = test, main = "Monthly mean of the daily Odba")
+# sex
+boxplot(daily_mean_ODBA ~ SEX, data = test, col = c('blue3','red2'), main = "Monthly mean of the daily Odba")
+# Chick age
+boxplot(daily_mean_ODBA ~ CHICKAGE, data = test, col = c('blue3','red2'), main = "Monthly mean of the daily Odba")
+```
+
+Mean daily ODBA: increases with the number of chicks, decreases in males, increases with the chick age
+
+```{r}
+### Choice of the random factors
+#LM, constant model
+mod <- lm(daily_mean_ODBA ~1, data = test)
+AICc(mod) #-224.0653
+
+#LMM
+mod1 <- lmer(daily_mean_ODBA ~(1|POP/device), data = test)
+AICc(mod1)#-213.4173
+mod2 <- lmer(daily_mean_ODBA ~(1|POP/device) + (1|PRODUCTION_envol), data = test)
+AICc(mod2)#-213.4173
+mod3 <- lmer(daily_mean_ODBA ~(1|PRODUCTION_envol), data = test)
+AICc(mod3) #-214.6008 
+mod4 <- lmer(daily_mean_ODBA ~(1|device), data = test)
+AICc(mod4) #-215.2044*
+mod5 <- lmer(daily_mean_ODBA ~(1|device) + (1|POP), data = test)
+AICc(mod5)#-213.4173
+mod6 <- lmer(daily_mean_ODBA ~(1|POP), data = test)
+AICc(mod6)#-214.9878
+mod7 <- lmer(daily_mean_ODBA ~(1|device) + (1|PRODUCTION_envol), data = test)
+AICc(mod7) #-213.7291
+
+#Compare AICc
+model_list <- list(mod, mod1, mod2, mod3, mod4, mod5, mod6)
+aiccs <- sapply(model_list, AICc)
+aiccs #-224.0653 -213.4173 -211.9533 -214.6008 -215.2044 -213.4173 -214.9878
+best_model <- model_list[[which.min(aiccs)]] 
+best_model # daily_mean_ODBA ~ (1 | device)
+#not a lot of diference  with pop but the individual variability incorporates the population variability
+
+```
+
+Best model with only device as random factor
+
+### GAMM with the complete model: linearity of the relationship?
+
+```{r}
+modgam <- gamm(daily_mean_ODBA ~ s(SPEI_har_pond)+ SEX + CHICKAGE,  random = list(device =~1), data = test)
+summary(modgam$gam)
+AICc(modgam)# -267.1109
+
+#remove SEX
+modgam4 <- gamm(daily_mean_ODBA ~ s(SPEI_har_pond) + CHICKAGE,  random = list(device =~1), data = test)
+AICc(modgam4)#-262.4902 No, the model is worst without it
+
+#remove Chick age
+modgam4 <- gamm(daily_mean_ODBA ~ s(SPEI_har_pond) + SEX,  random = list(device =~1), data = test)
+AICc(modgam4) # -225.7062, keep both factors
+
+#best model
+modgam <- gamm(daily_mean_ODBA ~ s(SPEI_har_pond) + SEX + CHICKAGE,  random = list(device =~1), data = test)
+AICc(modgam)
+
+plot(modgam$gam)
+plot(modgam$lme)
+summary(modgam$gam) #Ref edf = 1 linear relationship
+
+ # Each plot represents the smoothed effect of a continuous variable on the response variable. 
+ # The solid line is the estimated effect, and the shaded areas represent the 95% confidence intervals.
+summary(modgam$lme)
+```
+
+Linear relationships --\> LMM or GLMM
+
+### LMM Model selection
+
+```{r,results='hide',fig.keep='all'}
+
+#Complete model
+modglm <- lmer(daily_mean_ODBA~ SPEI_har_pond + SEX + CHICKAGE +
+                  (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm)# -269.5217 
+r.squaredGLMM(modglm)
+
+
+##FACTORS
+#remove sex
+modglm <- lmer(daily_mean_ODBA~ SPEI_har_pond + CHICKAGE + (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm) #-264.8349, the model is worse, keep it
+r.squaredGLMM(modglm)
+
+#remove chick age
+modglm <- lmer(daily_mean_ODBA~ SPEI_har_pond + SEX + (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm) # -226.9194 idem keep them both
+r.squaredGLMM(modglm)
+
+#SPEI alone
+modglm <- lmer(daily_mean_ODBA~ SPEI_har_pond + (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm) #-222.4329
+r.squaredGLMM(modglm)
+
+#only chickage
+modglm <- lmer(daily_mean_ODBA~ CHICKAGE + (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm) #827.3163
+r.squaredGLMM(modglm)
+
+#only sex
+modglm <- lmer(daily_mean_ODBA~ SEX + (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm) #-222.4329
+r.squaredGLMM(modglm)
+
+#chickage et sex
+modglm <- lmer(daily_mean_ODBA~ SEX + CHICKAGE + (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm) #-222.4329
+r.squaredGLMM(modglm)
+
+#NULL
+modglm <- lmer(daily_mean_ODBA~ (1|device), data = test, REML = F, na.action = na.fail)
+AICc(modglm) #-223.1895
+r.squaredGLMM(modglm)
+
+modok <- lmer(daily_mean_ODBA~ SEX + CHICKAGE + (1|device), data = test, REML = T, na.action = na.fail)
+
+```
+Avec Dredge
+
+```{r}
+fullmod <-  lmer(daily_mean_ODBA~ SPEI_har_pond + SEX + CHICKAGE +
+                  (1|device), data = test, REML = F, na.action = na.fail)
+
+Dredge <- dredge(fullmod)
+
+#2 modèles en concurrence
+modglm <- lmer(daily_mean_ODBA~ SEX + CHICKAGE +
+                  (1|device), data = test, REML = T, na.action = na.fail)
+#Estimate nul pour ajout de SPEI + CHICKAGE + SEX ?
+modglm <- lmer(daily_mean_ODBA~ SPEI_har_pond + SEX + CHICKAGE +
+                  (1|device), data = test, REML = T, na.action = na.fail)
+confint(modglm, oldNames=FALSE) #CHICKAGE ESTIMATE NULL
+summary(modglm)
+
+```
+
+### Model validation
+
+```{r}
+#selected model
+#REML = T for model validation (provides less biased estimates of the variance components)
+modok <- lmer(daily_mean_ODBA~ SEX + CHICKAGE + (1|device), data = test, REML = T, na.action = na.fail)
+
+#residuals (normality and independance)
+qqnorm(resid(modok))
+qqline(resid(modok)) #ok for residuals normality
+#idem
+hist(residuals(modok))
+
+# residuals vs fitted (homoscedasticity)
+plot(residuals(modok)~fitted(modok)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok for independance: no pattern
+
+
+#residuals against factors (relationship linearity and variance equality)
+plot(residuals(modok)~ test$CHICKAGE,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "Chick age",
+         main = "")
+abline(h = 0)
+
+plot(residuals(modok)~ test$SEX,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "SEX",
+         main = "")
+abline(h = 0)
+
+plot(residuals(modok)~ test$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+plot(Effect("CHICKAGE",modok,partial.residuals=TRUE))
+plot(Effect("SEX",modok,partial.residuals=TRUE))
+
+#Multicolinearity
+vif(modok)
+#(Zuur et al: threshold 5-6)
+
+#marginal and conditional R-squared values 
+r.squaredGLMM(modok)
+#        R2m       R2c
+#[1,] 0.4640072 0.5542994
+
+#IConfidence interval (95%) for each variable
+confint(modok, oldNames=FALSE)
+
+#Homoscedasticity Breusch-Pagan test
+# Model residuals
+residus <- resid(modok)
+# bptest(resid)
+
+#Regression residuals - variables
+lm_resid <- lm(residus^2 ~ SPEI_har_pond + SEX + CHICKAGE, data = test)
+
+# Effectuer le test Breusch-Pagan
+bptest(lm_resid)
+#ok !
+
+BIC(modok)
+
+summary(modok)
+
+#                Estimate Std. Error        df t value Pr(>|t|)    
+# (Intercept)    0.275286   0.010271 21.560931  26.802  < 2e-16 ***
+# SPEI_har_pond -0.008689   0.006121 71.090867  -1.420   0.1601    
+# SEXM          -0.034594   0.012218 16.715687  -2.831   0.0117 *  
+# CHICKAGE1      0.069207   0.008716 59.599359   7.940 6.47e-11 ***
+
+###PLOT
+library(ggeffects)
+effect_data <- ggpredict(modok, terms = c("SPEI_har_pond", "SEX", "CHICKAGE"), ci_level = 0.95)
+
+ggplot(effect_data, aes(x = x, y = predicted, group = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = group), alpha = 0.15) +
+  geom_line(aes(color = group), alpha = 2) +
+  scale_color_manual(values = c("darkred", "deepskyblue4")) +  # Les lignes noires pour les deux groupes
+  scale_fill_manual(values = c("M" = "deepskyblue", "F" = "red")) +
+  facet_wrap(~facet, scales = "free") +
+  labs(title = "Effect of SPEI, SEX, and CHICKAGE on Daily Mean ODBA",
+       x = "SPEI_har_pond", y = "Daily Mean ODBA") +
+  theme_classic()
+
+
+
+#FA méthod
+coef <- coefficients(modok)
+coef
+coef(modok)
+
+
+library(emmeans)
+## Obtenir les moyennes marginales estimées
+emmeans_result <- emmeans(modok, ~ SEX + CHICKAGE)
+#Compute estimated marginal means (EMMs) for specified factors or factor combinations in a linear model; and optionally, comparisons or contrasts among them. EMMs are also known as least-squares means.
+
+# Convertir en data.frame pour ggplot
+emmeans_df <- as.data.frame(emmeans_result)
+
+
+ggplot(test, aes(x = CHICKAGE, y = daily_mean_ODBA, fill = SEX)) +
+  geom_boxplot(position = position_dodge(width = 0.8), alpha = 0.6) +
+  labs(x = "Sex", y = "Daily mean ODBA",
+       fill = "Period") +
+  theme_minimal()
+
+ggplot(test, aes(x = as.factor(CHICKAGE), y = daily_mean_ODBA, fill = SEX)) +
+  geom_boxplot(position = position_dodge(width = 0.8), 
+               alpha = 0.3,  # Augmente la transparence
+               color = "black") +  # Contour noir
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.8), 
+              size = 0.8, color = "black") +  # Points noirs
+  labs(x = "Chick Age", y = "Daily Mean ODBA",
+       fill = "Sex") +  # Ajustement des légendes
+  theme_classic()
+
+ggplot(test, aes(x = CHICKAGE, y = daily_mean_ODBA, fill = SEX)) +
+  geom_errorbar(data = emmeans_df, aes(x = as.factor(CHICKAGE), y = emmean, 
+                                       ymin = lower.CL, ymax = upper.CL, color = SEX),
+                position = position_dodge(width = 0.8), width = 0.4) +  # Barres d'erreur
+  geom_point(data = emmeans_df, aes(x = as.factor(CHICKAGE), y = emmean, color = SEX), 
+             position = position_dodge(width = 0.8), size = 3) +  # Point pour la moyenne
+  labs(x = "Sex", y = "Daily mean ODBA",
+       fill = "Period") +
+  theme_minimal()
+
+
+# Ajouter les moyennes ajustées issues de emmeans
+ggplot(test, aes(x = SEX, y = daily_mean_ODBA, fill = CHICKAGE)) +
+  geom_boxplot(position = position_dodge(width = 0.8), alpha = 0.5) +
+  geom_point(data = emmeans_df, aes(x = SEX, y = emmean, color = CHICKAGE),
+             position = position_dodge(width = 0.8), size = 3, shape = 21) +
+  geom_errorbar(data = emmeans_df, aes(x = SEX, y = emmean, ymin = emmean - SE, ymax = emmean + SE, color = CHICKAGE),
+                position = position_dodge(width = 0.8), width = 0.2) +
+  labs(x = "Sex", y = "Daily mean ODBA",
+       fill = "Period", color = "Period") +
+  theme_minimal()
+
+#attention ici SE pas IC95 je crois ?!
+
+```
+
+# Représentation 2
+
+```{r}
+modok <- lmer(daily_mean_ODBA~   SPEI_har_pond + SEX + CHICKAGE + (1|device), data = test, REML = T, na.action = na.fail)
+
+library(nlme)
+modok<-lme(daily_mean_ODBA~ SPEI_har_pond + SEX + CHICKAGE, 
+                 random = ~1|device, data = test, na.action = na.fail, method = "REML")
+
+
+
+newdat <- expand.grid(SPEI_har_pond=seq(-1.569,1.86,0.1), SEX = c("F", "M"), CHICKAGE = c("0","1"))
+library(stats)
+newdat$pred <- stats::predict(modok, newdat, level = 0)
+
+Designmat <- model.matrix(formula(modok)[-2], newdat)
+predvar <- diag(Designmat %*% vcov(modok) %*% t(Designmat)) 
+newdat$SE <- sqrt(predvar) 
+newdat$SE2 <- sqrt(predvar+modok$sigma^2)
+
+cmult <- 1.96
+
+g0 <- ggplot(newdat, aes(x = SPEI_har_pond, y = pred, colour = SEX)) + 
+  geom_line() +
+  geom_ribbon(aes(ymin = pred - cmult * SE, ymax = pred + cmult * SE, fill = SEX), alpha = 0.1) +
+  geom_point(data = test, aes(x = SPEI_har_pond, y = daily_mean_ODBA, col = SEX)) +
+  scale_color_manual(values = c("darkred", "deepskyblue4")) +
+  scale_fill_manual(values = c("M" = "deepskyblue", "F" = "red")) +
+  facet_wrap(~ CHICKAGE, scales = "fixed", ncol = 1) +
+  theme_classic() +
+  labs(x = "SPEI", y = "ODBA") +
+  theme(
+    axis.text.x = element_text(size = 16),  # Increase size of x-axis text
+    axis.text.y = element_text(size = 16),  # Increase size of y-axis text
+    axis.title.x = element_text(size = 18), # Increase size of x-axis title
+    axis.title.y = element_text(size = 18), # Increase size of y-axis title
+    strip.text = element_blank()  # Remove facet labels
+  )
+
+```
+
+
+### Model validation: remove the 4 incomplete months
+
+```{r}
+# #remove the 4 incomplete months
+# test1 <- test %>%
+#   filter(!(id %in% c("6_21_2", "17_23_2", "25_20_1", "37_20_1")))
+# 
+# 
+# #REML = T for model validation (provides less biased estimates of the variance components)
+# modok <- lmer(daily_mean_ODBA~  ecart_cumul_annuel_moyen + SEX + CHICKAGE + (1|device), data = test1, REML = T, na.action = na.fail)
+# 
+# 
+# #residuals (normality and independance)
+# qqnorm(resid(modok))
+# qqline(resid(modok)) #ok for residuals normality
+# #idem
+# hist(residuals(modok))
+# 
+# # residuals vs fitted (homoscedasticity)
+# plot(residuals(modok)~fitted(modok)
+#       , col='blue'
+#       , pch=16)
+# abline(h = 0)
+# #ok for independance: no pattern
+# 
+# 
+# #residuals against factors (relationship linearity and variance equality)
+# plot(residuals(modok)~ test1$CHICKAGE,
+#          varwidth = TRUE,
+#          ylab = "Residuals",
+#          xlab = "Chick age",
+#          main = "")
+# abline(h = 0)
+# 
+# plot(residuals(modok)~ test1$SEX,
+#          varwidth = TRUE,
+#          ylab = "Residuals",
+#          xlab = "SEX",
+#          main = "")
+# abline(h = 0)
+# 
+# plot(residuals(modok)~ test1$ecart_cumul_annuel_moyen,
+#          ylab = "Residuals",
+#          xlab = "Anomaly in mean annual prcp",
+#          main = "")
+# abline(h = 0)
+# 
+# plot(Effect("ecart_cumul_annuel_moyen",modok,partial.residuals=TRUE))
+# 
+# #Multicolinearity
+# vif(modok)
+# #(Zuur et al: threshold 5-6)
+# # ecart_cumul_annuel_moyen                      SEX                 CHICKAGE 
+# #                 1.007907                 1.003276                 1.008072
+# 
+# #marginal and conditional R-squared values 
+# r.squaredGLMM(modok)
+# #  0.4538513 0.5361808
+# 
+# #IConfidence interval (95%) for each variable
+# confint(modok, oldNames=FALSE)
+# 
+# 
+# #Homoscedasticity Breusch-Pagan test
+# # Model residuals
+# residus <- resid(modok)
+# # bptest(resid)
+# 
+# #Regression residuals - variables
+# lm_resid <- lm(residus^2 ~ SPEI_har_pond + SEX + CHICKAGE, data = test1)
+# 
+# # Effectuer le test Breusch-Pagan
+# bptest(lm_resid)
+# #ok !
+# 
+# BIC(modok)
+# 
+# summary(modok) #same effects
+# 
+# #                  Estimate Std. Error      df t value Pr(>|t|)    
+# # (Intercept)               275.159      9.863  25.087  27.897  < 2e-16 ***
+# # ecart_cumul_annuel_moyen   -9.691      4.765  71.565  -2.034   0.0457 *  
+# # SEXM                      -33.729     11.774  17.926  -2.865   0.0103 *  
+# # CHICKAGE2                  63.396      8.851  57.838   7.163 1.59e-09 ***
+```
+
+Conclusion: The monthly mean of the daily ODBA: - decreases when prcp departure to the mean is high so in wetter conditions - decreases in males - increases when the chick is older Hypotheses: drought + old chick = more foraging and flying activities
+
+Test du modèle en enlevant les mois de - de 21j
+
+```{r}
+id_30_to_delete <- c("190657_2021_2", "190665_2020_1", "200015_2020_1")
+test1 <-  test[!(test$id_30 %in% id_30_to_delete), ]
+
+
+#selected model
+#REML = T for model validation (provides less biased estimates of the variance components)
+modok <- lmer(daily_mean_ODBA~   SPEI_har_pond + SEX + CHICKAGE + (1|device), data = test1, REML = T, na.action = na.fail)
+AICc(modok)#798.3452 ->770.3278
+
+#residuals (normality and independance)
+qqnorm(resid(modok))
+
+qqline(resid(modok)) #ok for residuals normality
+#idem
+hist(residuals(modok))
+
+# residuals vs fitted (homoscedasticity)
+plot(residuals(modok)~fitted(modok)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok for independance: no pattern
+
+
+#residuals against factors (relationship linearity and variance equality)
+plot(residuals(modok)~ test1$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+#marginal and conditional R-squared values 
+r.squaredGLMM(modok)
+#            R2m       R2c
+# [1,] 0.4549217 0.5315197
+
+#IConfidence interval (95%) for each variable
+confint(modok, oldNames=FALSE)
+
+#Homoscedasticity Breusch-Pagan test
+# Model residuals
+residus <- resid(modok)
+# bptest(resid)
+
+#Regression residuals - variables
+lm_resid <- lm(residus^2 ~ SPEI_har_pond + SEX + CHICKAGE, data = test1)
+
+# Effectuer le test Breusch-Pagan
+bptest(lm_resid)
+#ok ! p>0.005
+
+summary(modok)
+
+#PLot it
+plot(residuals(modok)~ test1$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+```
+

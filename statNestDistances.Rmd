@@ -1,0 +1,792 @@
+---
+title: "mean_dist_nest_model"
+output:
+  html_document: default
+  pdf_document: default
+date: "2024-05-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The aim of this script is to statistically test the link between average daily distance from the nest and various factors as explanatory variables (drought index, sex, age of chicks, etc.) via the construction of a mixed model.
+
+## Load packages
+
+```{r, message= FALSE, warning=FALSE}
+library(dplyr)
+library(corrplot)
+library(lme4) # for lmer
+library(nlme) #for gls (glmm)
+library(lmerTest)
+library(Matrix) 
+library(MuMIn) # for Dredge()
+library(car) # for vif()
+library(lubridate)
+library(GGally) #correlation synthese
+library(mgcv) #for gam
+library(lmtest) #Breusch-Pagan test
+library(effects)
+library(flexmix) #for BIC extraction
+library(performance) #R²
+library(gridExtra)#grid.arrange
+```
+
+## Prepare DATA
+
+```{r, warning=FALSE, message=FALSE}
+data1 <-
+  read.table(
+    "D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Scripts_current/Analyses_stats/matrice_ciccic_2025.txt",
+    header = T,
+    dec = ","
+  )
+#79 periods
+
+data <-
+  data1[, c(
+    "device",
+    "id_30",
+    "Deviceyear",
+    "POP",
+    "SEXE",
+    "PRODUCTION_envol",
+    "CHICKAGE",
+    "SPEI_har_pond",
+    "Mean_nest_dist"
+  )]
+
+#Convert into the good type
+data <- data %>%
+  mutate(across(c(POP, SEXE, PRODUCTION_envol, CHICKAGE), as.factor)) %>%
+  mutate(across(c(SPEI_har_pond, Mean_nest_dist), as.numeric))
+
+
+# With the default settings, the scale() function calculates the vector’s mean and standard deviation, here it is not needed as we have only one numeric explictaive variable
+# then “scales” each element by removing the mean and dividing by the sd.
+#Here it is necessary sinc the meteorological descriptors have different units
+
+table(data$PRODUCTION_envol)
+# Only one individual has 5 chicks :add it to the 4+ class
+data$PRODUCTION_envol <-
+  ifelse(
+    data$PRODUCTION_envol == 4 |
+      data$PRODUCTION_envol == 5,
+    "4+",
+    as.character(data$PRODUCTION_envol)
+  )
+
+data$PRODUCTION_envol <- as.factor(data$PRODUCTION_envol)
+data$device <- as.factor(data$device)
+```
+
+## Explicative variables description and distribution
+
+```{r}
+
+#SPEI Hargreaves
+dotchart(data$SPEI_har_pond,pch=16,col='blue',xlab='SPEI')
+# Histogram
+hist(data$SPEI_har_pond,col='blue',xlab="SPEI",main="") #not normal
+
+# Quantile-Quantile plot
+qqnorm(data$SPEI_har_pond,pch=16,col='blue',xlab='')
+qqline(data$SPEI_har_pond,col='red') #not normal
+
+#factors
+#Chick production 
+table(data$PRODUCTION_envol) #pas équilibré
+
+#SEXE
+table(data$SEX)
+
+#Chick age
+table(data$CHICKAGE)
+```
+
+#Y distribution
+
+```{r}
+test <-
+  data[, c(
+    "device",
+    "id_30",
+    "Mean_nest_dist",
+    "POP",
+    "SEXE",
+    "PRODUCTION_envol",
+    "CHICKAGE",
+    "SPEI_har_pond"
+  )]
+test$PRODUCTION_envol <- as.factor(test$PRODUCTION_envol)
+test$device <- as.factor(test$device)
+
+#Check for missing values
+colSums(is.na(test))
+
+#Y distribution
+
+par(mfrow = c(2, 2))
+# Boxplot
+boxplot(test$Mean_nest_dist, col = 'blue', ylab = 'Mean daily distances to the nest')
+# Cleveland plot
+dotchart(
+  test$Mean_nest_dist,
+  pch = 16,
+  col = 'blue',
+  xlab = 'Mean daily distances to the nest'
+)
+# Histogram
+hist(
+  test$Mean_nest_dist,
+  col = 'blue',
+  xlab = "Mean daily distances to the nest",
+  main = ""
+)
+# Quantile-Quantile plot
+qqnorm(
+  test$Mean_nest_dist,
+  pch = 16,
+  col = 'blue',
+  xlab = ''
+)
+qqline(test$Mean_nest_dist, col = 'red')
+# Non normal
+shapiro.test(test$Mean_nest_dist) #W = 0.80189, p-value = 6.279e-09 not normal
+#No outlier
+```
+
+No outliers, non-linear distribution
+
+### Potential relationships between Xs and Y
+
+```{r}
+par(mfrow=c(1,4))
+
+# SPEI
+plot(
+  test$Mean_nest_dist ~ test$SPEI_har_pond,
+  pch = 16,
+  col = 'blue',
+  xlab = 'SPEI',
+  ylab = 'Mean distance to the nest'
+)
+
+# Production
+boxplot(Mean_nest_dist ~ PRODUCTION_envol,
+        data = test,
+        main = "Mean distance to the nest")
+# sex
+boxplot(
+  Mean_nest_dist ~ SEXE,
+  data = test,
+  col = c('blue3', 'red2'),
+  main = "Mean distance to the nest"
+)
+# Chick age
+boxplot(
+  Mean_nest_dist ~ CHICKAGE,
+  data = test,
+  col = c('blue3', 'red2'),
+  main = "Mean distance to the nest"
+)
+```
+
+Mean distance to the nest: decreases with the number of chicks, increases in males, slightly increases with the chick age (not tested yet)
+
+### Choice of the random factors
+
+Stepwise forward selection beginning with a LMM The best random structure minimizes the AICc and is the most parsimonious with a delta AICc \< 2 (if several models AICc are close from each other and minimum)
+
+```{r}
+#LM, constant model
+mod <- lm(Mean_nest_dist~1, data = test)
+summary(mod)
+
+#LMM
+mod1 <- lmer(Mean_nest_dist~(1|POP/device), data = test)
+#summary(mod1)
+mod2 <- lmer(Mean_nest_dist~(1|POP/device) + (1|PRODUCTION_envol), data = test)
+#summary(mod2)
+mod3 <- lmer(Mean_nest_dist~(1|PRODUCTION_envol), data = test)
+#summary(mod3)
+mod4 <- lmer(Mean_nest_dist~(1|device), data = test)
+#summary(mod4)
+mod5 <- lmer(Mean_nest_dist~(1|device) + (1|POP), data = test)
+#summary(mod5)
+mod6 <- lmer(Mean_nest_dist~ (1|POP), data = test)
+#summary(mod6)
+
+#Compare AICc
+model_list <- list(mod, mod1, mod2, mod3, mod4, mod5, mod6)
+aiccs <- sapply(model_list, AICc)
+aiccs #1403.883 1379.936 1376.009 1389.023 1378.195 1379.936 1389.694
+best_model <- model_list[[ which.min(aiccs)]]
+best_model 
+#Mean_nest_dist ~ (1 | POP/device) + (1 | PRODUCTION_envol) 1376.009 and delta AICc >2
+```
+
+\~ (1 \| POP/device) + (1 \| PRODUCTION_envol) is the selected random structure
+
+### GAMM with the complete model: linearity of the relationship?
+
+The Edf (Effective degree of Freedom) indicates the degree of complexity for each relationship \n
+
+The Bayesian model of spline smoothing introduced by Wahba (1983) and Silverman (1985) opens up the possibility of estimating the degree of smoothness of terms in a generalized additive model as variances of the wiggly components of the smooth terms treated as random effects The default method is REML (Restricted Maximum Likelihood), it generally provides better estimates of variance components and is less biased, which is advantageous in most applications involving mixed-effects models. LM : maximum likelihood, is better to compare fixed effects combinations
+
+```{r, warning=FALSE , message=FALSE}
+
+#without any factor
+modgam <- gamm(Mean_nest_dist~s(SPEI_har_pond),  random = list(POP = ~1|device, PRODUCTION_envol = ~1), method = "ML", data = test)
+AICc(modgam) # 1383.026
+
+
+#remove SEX
+modgam <- gamm(Mean_nest_dist~ s(SPEI_har_pond) + 
+                 CHICKAGE, random = list(POP = ~1|device, PRODUCTION_envol = ~1), method = "ML", data = test)
+AICc(modgam)# 1383.922 delta <2 it doesn't improve the model so remove it
+
+#remove chick age
+modgam <- gamm(Mean_nest_dist~s(SPEI_har_pond) + 
+                 SEXE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1), method = "ML", data = test)
+AICc(modgam)# 1384.386 idem
+
+#avec les deux
+modgam <- gamm(Mean_nest_dist~s(SPEI_har_pond) + 
+                 SEXE + CHICKAGE,  random = list(POP = ~1|device, PRODUCTION_envol = ~1), method = "ML", data = test)
+AICc(modgam)#1385.374
+
+summary(modgam$gam) #Edf = 1 for SPEI
+#Standardized residuals vs predicted values: random distribution = ok (exploration here)
+plot(modgam$lme, which = 1) # heteroscedasticity, 
+#will probably need a transformation -> see with the GLMM model
+```
+
+Edf = 1 --\> linear relationship --\> LMM
+
+## LMM model backward selection
+
+To select the significant explicative variables
+
+REML = F (so ML) ML ensures that the likelihood function is calculated in a consistent manner across different models, making AIC (Akaike Information Criterion) or AICc (corrected AIC) comparisons valid.
+
+```{r}
+#selected model
+modglm <- lmer(Mean_nest_dist~  SPEI_har_pond + SEXE + CHICKAGE +
+                  (1 | POP/device) + (1 | PRODUCTION_envol), data = test, REML = F, na.action = na.fail)
+AICc(modglm)#1389.625
+
+#whithout SEXE
+modglm1 <- lmer(Mean_nest_dist~ SPEI_har_pond +  CHICKAGE +
+                 (1 | POP/device) + (1 | PRODUCTION_envol), data = test, REML = F, na.action = na.fail)
+AICc(modglm1) # 1388.924, delta aic <2, remove it
+
+#whithout CHICKAGE
+modglm2 <- lmer(Mean_nest_dist~SPEI_har_pond + SEXE +
+                 (1 | POP/device) + (1 | PRODUCTION_envol), data = test, REML = F, na.action = na.fail)
+AICc(modglm2) # 1388.978 delta <2
+#keep the most parsimonious
+
+#only SPEI
+modglm4 <- lmer(Mean_nest_dist~  SPEI_har_pond +
+                 (1 | POP/device) + (1 | PRODUCTION_envol), data = test, REML = F, na.action = na.fail)
+AICc(modglm4)# 1388.437
+
+
+#Standardized residuals vs predicted values: if random distribution = ok
+plot(modglm4, which = 1) #Heteroscedasticity ! Need a transformation
+```
+
+Singular pattern --\> heteroskedasticity !
+
+### #Log transformation to avoid heteroskedasticity:
+
+```{r}
+test$Mean_nest_dist_log <- log(test$Mean_nest_dist)
+
+#new distribution
+par(mfrow = c(2, 2))
+# Boxplot
+boxplot(test$Mean_nest_dist_log,
+        col = 'blue',
+        ylab = 'Mean of the monthly mean (log) of daily distances to the nest')
+# Cleveland plot
+dotchart(
+  test$Mean_nest_dist_log,
+  pch = 16,
+  col = 'blue',
+  xlab = 'Mean of the monthly mean (log) of daily distances to the nest'
+)
+# Histogram
+hist(
+  test$Mean_nest_dist_log,
+  col = 'blue',
+  xlab = "Mean of the monthly mean (log) of daily distances to the nest",
+  main = ""
+)
+# Quantile-Quantile plot
+qqnorm(
+  test$Mean_nest_dist_log,
+  pch = 16,
+  col = 'blue',
+  xlab = ''
+)
+qqline(test$Mean_nest_dist_log, col = 'red')
+
+shapiro.test(test$Mean_nest_dist)# W = 0.80189, p-value = 6.279e-09 Non normal
+shapiro.test(test$Mean_nest_dist_log) #W = 0.98495, p-value = 0.4809 Normal
+#No outlier
+```
+
+### LOG Choice of the random factors
+
+Same process as before
+
+```{r}
+#LM, constant model
+mod <- lm(Mean_nest_dist_log~1, data = test)
+AICc(mod)#202.0492
+
+#LMM
+mod1 <- lmer(Mean_nest_dist_log~(1|POP/device), data = test)
+AICc(mod1)#186.631
+mod2 <- lmer(Mean_nest_dist_log~(1|POP/device) + (1|PRODUCTION_envol), data = test)
+AICc(mod2)#182.9778
+mod3 <- lmer(Mean_nest_dist_log~(1|PRODUCTION_envol), data = test)
+AICc(mod3)# 202.3324
+mod4 <- lmer(Mean_nest_dist_log~(1|device), data = test)
+AICc(mod4)#185.7412
+mod5 <- lmer(Mean_nest_dist_log~(1|device) + (1|POP), data = test)
+AICc(mod5)#186.631
+mod6 <- lmer(Mean_nest_dist_log~ (1|POP), data = test)
+AICc(mod6)#199.255
+
+#Compare AICc
+model_list <- list(mod, mod1, mod2, mod3, mod4, mod5, mod6)
+aiccs <- sapply(model_list, AICc)
+aiccs #202.0492 186.6310 182.9778 202.3324 185.7412 186.6310 199.2550
+best_model <- model_list[[ which.min(aiccs)]]
+best_model 
+#Mean_nest_dist ~ (1 | POP/device) + (1 | PRODUCTION_envol)  
+```
+
+It keeps the same random structure
+
+### LOG GAMM with the complete log model: linearity of the relationship?
+
+```{r}
+#log transformation seems to be useful: complete model
+modgam1 <-
+  gamm(
+    Mean_nest_dist_log ~ s(SPEI_har_pond) + SEXE +
+      CHICKAGE,
+    random = list(POP = ~ 1 |
+                    device, PRODUCTION_envol = ~ 1),
+    method = "ML",
+    data = test
+  )
+AICc(modgam1) #193.8934
+
+#Try to remove SEX
+modgam2 <- gamm(
+  Mean_nest_dist_log ~  s(SPEI_har_pond) +
+    CHICKAGE,
+  random = list(POP = ~ 1 |
+                  device, PRODUCTION_envol = ~ 1),
+  method = "ML",
+  data = test
+)
+AICc(modgam2)#192.8182 delta AICC < 2 so remove it
+
+#Try to remove Chickage
+modgam3 <-
+  gamm(
+    Mean_nest_dist_log ~ s(SPEI_har_pond) + SEXE,
+    random = list(POP = ~ 1 |
+                    device, PRODUCTION_envol = ~ 1),
+    method = "ML",
+    data = test
+  )
+AICc(modgam3)# 192.1515 idem
+
+#without the factors
+modgam <-
+  gamm(
+    Mean_nest_dist_log ~ s(SPEI_har_pond),
+    random = list(POP = ~ 1 |
+                    device, PRODUCTION_envol = ~ 1),
+    method = "ML",
+    data = test
+  )
+AICc(modgam) #191.1692
+
+plot(modgam$gam)
+summary(modgam$gam) #edf = 1 -> linear relationship
+
+# Each plot represents the smoothed effect of a continuous variable on the response variable.
+# The solid line is the estimated effect, and the shaded areas represent the 95% confidence intervals.
+summary(modgam$lme)
+```
+
+Linear relationship for SPEI --\> LMM
+
+## LOG LMM model backward selection
+
+REML = F (so ML) ML ensures that the likelihood function is calculated in a consistent manner across different models, making AIC (Akaike Information Criterion) or AICc (corrected AIC) comparisons valid.
+
+```{r}
+#complete model
+modglm <- lmer(Mean_nest_dist_log~  SPEI_har_pond + SEXE + CHICKAGE +
+                  (1|POP/device) + (1|PRODUCTION_envol), data = test, REML = F, na.action = na.fail)
+AICc(modglm)#181.4757
+r.squaredGLMM(modglm)
+
+#whithout SEXE
+modglm2 <- lmer(Mean_nest_dist_log~   SPEI_har_pond +  CHICKAGE +
+                  (1|POP/device) + (1|PRODUCTION_envol), data = test, REML = F, na.action = na.fail)
+AICc(modglm2) #180.054 , delta AICc <2, remove it
+r.squaredGLMM(modglm2)
+
+#whithout CHICKAGE
+modglm3 <- lmer(Mean_nest_dist_log~  SPEI_har_pond + SEXE +
+                  (1|POP/device) + (1|PRODUCTION_envol), data = test, REML = F, na.action = na.fail)
+AICc(modglm3) #180.4939 idem
+r.squaredGLMM(modglm3)
+
+#Only SPEI
+modglm4 <- lmer(Mean_nest_dist_log~  SPEI_har_pond +
+                  (1|POP/device) + (1|PRODUCTION_envol), data = test, REML = F, na.action = na.fail)
+AICc(modglm4) #179.2096
+r.squaredGLMM(modglm4)
+
+#only sex
+modglm4 <- lmer(Mean_nest_dist_log~  SEXE +
+                  (1|POP/device) + (1|PRODUCTION_envol), data = test, REML = F, na.action = na.fail)
+AICc(modglm4) #184.1427
+r.squaredGLMM(modglm4)
+
+#only chickage
+modglm4 <- lmer(Mean_nest_dist_log~  CHICKAGE +
+                  (1|POP/device) + (1|PRODUCTION_envol), data = test, REML = F, na.action = na.fail)
+AICc(modglm4) #183.4918
+r.squaredGLMM(modglm4)
+
+#only sex + chickage
+modglm4 <- lmer(Mean_nest_dist_log~  CHICKAGE + SEXE +
+                  (1|POP/device) + (1|PRODUCTION_envol), data = test, REML = F, na.action = na.fail)
+AICc(modglm4) #184.9909
+r.squaredGLMM(modglm4)
+
+#NULL model
+modglm5 <-
+  lmer(
+    Mean_nest_dist_log ~ (1 | POP / device) + (1 | PRODUCTION_envol),
+    data = test,
+    REML = F,
+    na.action = na.fail
+  )
+AICc(modglm5) #182.7731 (delta AICc >2 so the best model is modglm4)
+r.squaredGLMM(modglm5)
+
+#selected model
+modglm <-
+  lmer(
+    Mean_nest_dist_log ~  SPEI_har_pond + (1 | POP / device) + (1 |PRODUCTION_envol),
+    data = test,
+    REML = F,
+    na.action = na.fail
+  )
+#Standardized residuals vs predicted values: random distribution = ok
+plot(modglm, which = 1) #Homoscedasticity ok
+#AICc(modglm)#174.2247
+```
+
+Homoskedasticity ok !
+
+Avec Dredge
+```{r}
+
+fullmod <- lmer(Mean_nest_dist_log~  SPEI_har_pond + SEXE + CHICKAGE +
+                  (1|POP/device) + (1|PRODUCTION_envol), data = test, REML = F, na.action = na.fail)
+Dredge <- dredge(fullmod)
+
+#3 modèles en concurrence
+#Estimate nul pour ajout de SEX ou de CHICKAGE ?
+modglm2 <- lmer(Mean_nest_dist_log~   SPEI_har_pond +  CHICKAGE +
+                  (1|POP/device) + (1|PRODUCTION_envol), data = test, REML = T, na.action = na.fail)
+confint(modglm2, oldNames=FALSE) #CHICKAGE ESTIMATE NULL
+summary(modglm2)
+
+modglm3 <- lmer(Mean_nest_dist_log~  SPEI_har_pond + SEXE +
+                  (1|POP/device) + (1|PRODUCTION_envol), data = test, REML = T, na.action = na.fail)
+confint(modglm3, oldNames=FALSE) 
+summary(modglm3)
+
+summary(model.avg(Dredge, subset = delta<2))
+```
+
+
+## LOG Model validation: assumption checking
+
+```{r}
+#selected model
+#REML = T for model validation (provides less biased estimates of the variance components)
+modok <- lmer(Mean_nest_dist_log~ SPEI_har_pond +
+                  (1|POP/device) + (1|PRODUCTION_envol), data = test, REML = T, na.action = na.fail)
+AICc(modok)#182.4488
+
+#residuals (normality and independance)
+qqnorm(resid(modok))
+
+qqline(resid(modok)) #ok for residuals normality
+#idem
+hist(residuals(modok))
+
+# residuals vs fitted (homoscedasticity)
+plot(residuals(modok)~fitted(modok)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok for independance: no pattern
+
+
+#residuals against factors (relationship linearity and variance equality)
+plot(residuals(modok)~ test$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+#marginal and conditional R-squared values 
+r.squaredGLMM(modok)
+#             R2m       R2c
+# [1,] 0.02894783 0.6969309
+
+#IConfidence interval (95%) for each variable
+confint(modok, oldNames=FALSE)
+
+#Homoscedasticity Breusch-Pagan test
+# Model residuals
+residus <- resid(modok)
+# bptest(resid)
+
+#Regression residuals - variables
+lm_resid <- lm(residus^2 ~ SPEI_har_pond + SEXE + CHICKAGE, data = test)
+
+# Effectuer le test Breusch-Pagan
+bptest(lm_resid)
+#ok ! p>0.005
+
+summary(modok)
+
+#PLot it
+plot(residuals(modok)~ test$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+```
+
+Conclusion: - The daily mean distance to the nest decreases in wetter conditions (high SPEI) So it increases in dryer conditions
+
+# Representation with and without the log trasnformation
+
+```{r}
+modok <- lm(Mean_nest_dist_log~ SPEI_har_pond, data = test, na.action = na.fail)
+
+newdat <- expand.grid(SPEI_har_pond=seq(-1.469,1.76,0.1))
+library(stats)
+newdat$pred <- stats::predict(modok, newdat, level = 0)
+
+resid <- residuals(modok)
+
+# Calculer l'écart-type des résidus
+sigma_lm <- sd(resid)
+
+Designmat <- model.matrix(formula(modok)[-2], newdat)
+predvar <- diag(Designmat %*% vcov(modok) %*% t(Designmat)) 
+newdat$SE <- sqrt(predvar) 
+newdat$SE2 <- sqrt(predvar+sigma_lm**2) #incertitude des prédiction + celle des résidus
+
+g0 <- ggplot(newdat,aes(x=SPEI_har_pond,y=pred))+geom_line()
+
+cmult <- 1.96  
+graph1 <- g0 + geom_ribbon(aes(ymin=pred-cmult*SE,ymax=pred+cmult*SE), alpha = 0.1,linetype = 0, fill = "deepskyblue") +
+  geom_point(data = test, aes(x = SPEI_har_pond, y = Mean_nest_dist_log)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(size = 16), 
+        axis.text.y = element_text(size = 16), 
+        axis.title.x = element_text(size = 18), 
+        axis.title.y = element_text(size = 18))+
+  labs(x = "SPEI", y = "Log(Distance from the nest)")
+
+graph1
+
+
+
+#sans le log
+
+newdat <- expand.grid(SPEI_har_pond=seq(-1.469,1.76,0.1))
+newdat$pred <- stats::predict(modok, newdat, level = 0)
+
+resid <- residuals(modok)
+
+# Calculer l'écart-type des résidus
+sigma_lm <- sd(resid)
+
+Designmat <- model.matrix(formula(modok)[-2], newdat)
+predvar <- diag(Designmat %*% vcov(modok) %*% t(Designmat)) 
+newdat$SE <- sqrt(predvar) 
+newdat$SE2 <- sqrt(predvar+sigma_lm**2)
+newdat$pred_nonlog <- exp(newdat$pred)
+newdat$SE_nonlog <- exp(newdat$SE)
+newdat$SE2_nonlog <- exp(newdat$SE2)
+
+newdat$pred_exp <- exp(newdat$pred)
+newdat$SE_exp_lower <- exp(newdat$pred - cmult * newdat$SE)
+newdat$SE_exp_upper <- exp(newdat$pred + cmult * newdat$SE)
+
+g0 <- ggplot(newdat,aes(x=SPEI_har_pond,y=pred_exp))+geom_line()
+
+graph1 <- g0 +
+  geom_ribbon(aes(ymin = SE_exp_lower, ymax = SE_exp_upper), fill = "deepskyblue", alpha = 0.1, linetype = 0) +
+  geom_point(data = test, aes(x = SPEI_har_pond, y = exp(Mean_nest_dist_log))) +
+  theme_bw() +
+  labs(x = "SPEI", y = "Distance from the nest")
+
+# Afficher le graphique
+graph1
+
+```
+
+Test du modèle en enlevant le smois de - de 21j
+
+```{r}
+id_30_to_delete <- c("190657_2021_2", "190665_2020_1", "200015_2020_1")
+test1 <-  test[!(test$id_30 %in% id_30_to_delete), ]
+
+
+#selected model
+#REML = T for model validation (provides less biased estimates of the variance components)
+modok <- lmer(Mean_nest_dist_log~ SPEI_har_pond +
+                  (1|POP/device) + (1|PRODUCTION_envol), data = test1, REML = T, na.action = na.fail)
+AICc(modok)#178.942
+
+#residuals (normality and independance)
+qqnorm(resid(modok))
+
+qqline(resid(modok)) #ok for residuals normality
+#idem
+hist(residuals(modok))
+
+# residuals vs fitted (homoscedasticity)
+plot(residuals(modok)~fitted(modok)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok for independance: no pattern
+
+
+#residuals against factors (relationship linearity and variance equality)
+plot(residuals(modok)~ test1$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+#marginal and conditional R-squared values 
+r.squaredGLMM(modok)
+#             R2m       R2c
+# [1,] 0.02894783 0.6969309 ---> 0.03287128 0.6738673
+
+#IConfidence interval (95%) for each variable
+confint(modok, oldNames=FALSE)
+
+#Homoscedasticity Breusch-Pagan test
+# Model residuals
+residus <- resid(modok)
+# bptest(resid)
+
+#Regression residuals - variables
+lm_resid <- lm(residus^2 ~ SPEI_har_pond + SEXE + CHICKAGE, data = test1)
+
+# Effectuer le test Breusch-Pagan
+bptest(lm_resid)
+#ok ! p>0.005
+
+summary(modok)
+
+#PLot it
+plot(residuals(modok)~ test$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+```
+
+
+Correlation matrix between the 4 descriptors
+```{r}
+
+data1 <-
+  read.table(
+    "D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/Scripts_current/Analyses_stats/matrice_ciccic_2025_odba.txt",
+    header = T,
+    dec = ","
+  )
+#79 periods
+
+summary(data1)
+hist(data1$HRker95_foraging)
+hist(data1$Mean_nest_dist)
+hist(data1$ratio_foraging_all)
+hist(data1$daily_mean_ODBA)
+
+shapiro.test(data1$HRker95_foraging)
+shapiro.test(data1$Mean_nest_dist)
+shapiro.test(data1$ratio_foraging_all)
+shapiro.test(data1$daily_mean_ODBA)
+
+cor(data1[, c("HRker95_foraging", "Mean_nest_dist", "ratio_foraging_all", "daily_mean_ODBA")], method = "spearman")
+
+library(corrplot)
+# Calcul de la matrice de corrélation avec Spearman
+corr_matrix <- cor(data1[, c("HRker95_foraging", "Mean_nest_dist", "ratio_foraging_all", "daily_mean_ODBA")], 
+                   method = "spearman")
+
+# Ordre personnalisé (remplacez par l'ordre souhaité)
+custom_order <- c("HRker95_foraging", "Mean_nest_dist", "ratio_foraging_all", "daily_mean_ODBA")
+
+# Réorganisation de la matrice selon cet ordre
+corr_matrix <- corr_matrix[custom_order, custom_order]
+
+corrplot(corr_matrix, method = "color", type = "upper", addCoef.col = "black", tl.col = "black", tl.srt = 45)
+
+#to have the p values
+cor_test1 <- cor.test(data1$HRker95_foraging, data1$Mean_nest_dist, method = "spearman")
+print(cor_test1$p.value)
+
+# Exemple de corrélation pour HRker95_foraging et ratio_foraging_all
+cor_test2 <- cor.test(data1$HRker95_foraging, data1$ratio_foraging_all, method = "spearman")
+print(cor_test2$p.value)
+
+# Exemple de corrélation pour HRker95_foraging et daily_mean_ODBA
+cor_test3 <- cor.test(data1$HRker95_foraging, data1$daily_mean_ODBA, method = "spearman")
+print(cor_test3$p.value)
+
+# Exemple de corrélation pour Mean_nest_dist et ratio_foraging_all
+cor_test4 <- cor.test(data1$Mean_nest_dist, data1$ratio_foraging_all, method = "spearman")
+print(cor_test4$p.value)
+
+# Exemple de corrélation pour Mean_nest_dist et daily_mean_ODBA
+cor_test5 <- cor.test(data1$Mean_nest_dist, data1$daily_mean_ODBA, method = "spearman")
+print(cor_test5$p.value)
+
+# Exemple de corrélation pour ratio_foraging_all et daily_mean_ODBA
+cor_test6 <- cor.test(data1$ratio_foraging_all, data1$daily_mean_ODBA, method = "spearman")
+print(cor_test6$p.value)
+```
+
