@@ -1,0 +1,2196 @@
+---
+title: "Stats_JABarticle_BEGASSATetal2025"
+author: "Oceane BEGASSAT"
+date: "2025-12-09"
+output: html_document
+---
+
+The aim of this scripts is to statistically test the variations in home-range size, daily foraging distances, the proportion of time spent foraging, and daily activity levels in relation to drought conditions and individual state (sex, brood age and brood size).
+
+
+# Load packages
+
+```{r, message= FALSE, warning=FALSE}
+library(dplyr)
+library(corrplot)
+library(lme4) # for lmer
+library(nlme) #for gls (glmm)
+library(lmerTest)
+library(Matrix) 
+library(MuMIn) # for Dredge()
+library(car) # for vif()
+library(lubridate)
+library(GGally) #correlation synthese
+library(mgcv) #for gam
+library(lmtest) #Breusch-Pagan test
+library(effects)
+library(flexmix) #for BIC extraction
+library(performance) #R²
+library(gridExtra)#grid.arrange
+library(emmeans) #marginal means
+library(ggeffects) #plots
+library(multcomp)
+```
+
+
+#Nest distances
+
+
+### Prepare DATA
+
+```{r, warning=FALSE, message=FALSE}
+# Set working directory if needed:
+# setwd("path/to/folder")
+
+setwd("D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Stage_2024_ECOBIO/ScriptsDryad/")
+
+data1 <- read.csv2("matrice_ciccic_2025all.csv", header = TRUE)
+#79 periods
+
+data <-
+  data1[, c(
+    "device",
+    "id_30",
+    "Deviceyear",
+    "POP",
+    "SEXE",
+    "PRODUCTION_envol",
+    "CHICKAGE",
+    "SPEI_har_pond",
+    "Mean_nest_dist"
+  )]
+
+#Convert into the good type
+data <- data %>%
+  mutate(across(c(POP, SEXE, PRODUCTION_envol, CHICKAGE), as.factor)) %>%
+  mutate(across(c(SPEI_har_pond, Mean_nest_dist), as.numeric))
+
+table(data$PRODUCTION_envol)
+
+
+# Only one individual has 5 chicks :add it to the 4+ class
+data$PRODUCTION_envol <-
+  ifelse(
+    data$PRODUCTION_envol == 4 |
+      data$PRODUCTION_envol == 5,
+    "4+",
+    as.character(data$PRODUCTION_envol)
+  )
+
+data$PRODUCTION_envol <- as.factor(data$PRODUCTION_envol)
+table(data$PRODUCTION_envol)
+data$device <- as.factor(data$device)
+```
+
+### Explicative variables description and distribution
+
+```{r}
+
+#SPEI Hargreaves
+dotchart(data$SPEI_har_pond,pch=16,col='blue',xlab='SPEI')
+# Histogram
+hist(data$SPEI_har_pond,col='blue',xlab="SPEI",main="") #not normal
+
+# Quantile-Quantile plot
+qqnorm(data$SPEI_har_pond,pch=16,col='blue',xlab='')
+qqline(data$SPEI_har_pond,col='red') #not normal
+
+#factors
+#Chick production 
+table(data$PRODUCTION_envol)
+
+#SEXE
+table(data$SEX)
+
+#Chick age
+table(data$CHICKAGE)
+```
+
+### Potential relationships between Xs and Y
+
+```{r}
+par(mfrow=c(1,4))
+
+# SPEI
+plot(
+  test$Mean_nest_dist ~ test$SPEI_har_pond,
+  pch = 16,
+  col = 'blue',
+  xlab = 'SPEI',
+  ylab = 'Mean distance to the nest'
+)
+
+# Production
+boxplot(Mean_nest_dist ~ PRODUCTION_envol,
+        data = test,
+        main = "Mean distance to the nest")
+# sex
+boxplot(
+  Mean_nest_dist ~ SEXE,
+  data = test,
+  col = c('blue3', 'red2'),
+  main = "Mean distance to the nest"
+)
+# Chick age
+boxplot(
+  Mean_nest_dist ~ CHICKAGE,
+  data = test,
+  col = c('blue3', 'red2'),
+  main = "Mean distance to the nest"
+)
+```
+
+###Y distribution
+
+```{r}
+test <-
+  data[, c(
+    "device",
+    "id_30",
+    "Mean_nest_dist",
+    "POP",
+    "SEXE",
+    "PRODUCTION_envol",
+    "CHICKAGE",
+    "SPEI_har_pond"
+  )]
+test$PRODUCTION_envol <- as.factor(test$PRODUCTION_envol)
+test$device <- as.factor(test$device)
+
+#Check for missing values
+colSums(is.na(test))
+
+#Y distribution
+
+par(mfrow = c(2, 2))
+# Boxplot
+boxplot(test$Mean_nest_dist, col = 'blue', ylab = 'Mean daily distances to the nest')
+# Cleveland plot
+dotchart(
+  test$Mean_nest_dist,
+  pch = 16,
+  col = 'blue',
+  xlab = 'Mean daily distances to the nest'
+)
+# Histogram
+hist(
+  test$Mean_nest_dist,
+  col = 'blue',
+  xlab = "Mean daily distances to the nest",
+  main = ""
+)
+# Quantile-Quantile plot
+qqnorm(
+  test$Mean_nest_dist,
+  pch = 16,
+  col = 'blue',
+  xlab = ''
+)
+qqline(test$Mean_nest_dist, col = 'red')
+# Non normal
+shapiro.test(test$Mean_nest_dist) #W = 0.80189, p-value = 6.279e-09 not normal
+#No outlier
+```
+
+### Log transformation 
+
+Previous model selection and validation showed heteroskedasticity.
+GAM were tested but 
+Edf = 1 --\> linear relationship --\> LMM
+
+```{r}
+### #Log transformation to avoid heteroskedasticity:
+
+test$Mean_nest_dist_log <- log(test$Mean_nest_dist)
+
+#new distribution
+par(mfrow = c(2, 2))
+# Boxplot
+boxplot(test$Mean_nest_dist_log,
+        col = 'blue',
+        ylab = 'Mean of the monthly mean (log) of daily distances to the nest')
+# Cleveland plot
+dotchart(
+  test$Mean_nest_dist_log,
+  pch = 16,
+  col = 'blue',
+  xlab = 'Mean of the monthly mean (log) of daily distances to the nest'
+)
+# Histogram
+hist(
+  test$Mean_nest_dist_log,
+  col = 'blue',
+  xlab = "Mean of the monthly mean (log) of daily distances to the nest",
+  main = ""
+)
+# Quantile-Quantile plot
+qqnorm(
+  test$Mean_nest_dist_log,
+  pch = 16,
+  col = 'blue',
+  xlab = ''
+)
+qqline(test$Mean_nest_dist_log, col = 'red')
+
+shapiro.test(test$Mean_nest_dist)# W = 0.80189, p-value = 6.279e-09 Non normal
+shapiro.test(test$Mean_nest_dist_log) #W = 0.98495, p-value = 0.4809 Normal
+#No outlier
+
+```
+### Model selection
+
+mean daily distance from the nest (logtransformed) ~
+SPEI +
+BROOD AGE +
+SEX +
+BROOD SIZE +
+SPEI*SEX +
+SPEI*BROOD AGE +
+SPEI*BROOD SIZE +
+r(ind/pop)
+
+```{r}
+#LM, constant model
+mod <- lm(Mean_nest_dist_log~1, data = test)
+AICc(mod)#202.049
+
+#LMM, full model
+mod1 <- lmer(
+  Mean_nest_dist_log ~ SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol + SPEI_har_pond *
+    SEXE + (1 | POP / device),
+  data = test
+)
+AICc(mod1)#205.48
+
+#change the random effect
+mod11 <- lmer(
+  Mean_nest_dist_log ~ SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol + SPEI_har_pond *
+    SEXE + (1 | POP),
+  data = test
+)
+AICc(mod11) #214.558
+
+mod12 <- lmer(
+  Mean_nest_dist_log ~ SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol + SPEI_har_pond *
+    SEXE + (1 | device),
+  data = test
+)
+AICc(mod12) #204.4618 parcimonious
+
+# no random effect
+mod2 <- lm(
+  Mean_nest_dist_log ~ SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol + SPEI_har_pond *
+    SEXE,
+  data = test
+)
+AICc(mod2)#208.7309 keep random
+
+
+#########################################
+# interactions can be tested ?
+table(test$CHICKAGE, test$PRODUCTION_envol) #carrefully
+table(test$CHICKAGE, test$SEXE)
+table(test$SEXE, test$PRODUCTION_envol) #no
+
+
+#Selection with Dredge
+fullmod <- lmer(
+  Mean_nest_dist_log ~ SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol + SPEI_har_pond *
+    SEXE + (1 | device), data = test, REML = F, na.action = na.fail)
+Dredge <- dredge(fullmod)
+
+#3 modeles delta AICc < 2
+
+mods <- get.models(Dredge, subset = 1:3)  
+r2_list <- lapply(mods, r.squaredGLMM)
+
+# Transform into data.frame
+r2_df <- do.call(rbind, r2_list)
+r2_df <- cbind(Model = names(mods), r2_df)
+print(r2_df)
+
+# Keep SPEI and PRODUCTION for all
+
+#Is the estimate NULL for chickage and PRODUCTION ?
+modglm <- lmer(Mean_nest_dist_log~   SPEI_har_pond + CHICKAGE  +
+                  (1|device), data = test, REML = T, na.action = na.fail)
+confint(modglm, oldNames=FALSE) #CHICKAGE ESTIMATE NULL
+summary(modglm)
+r.squaredGLMM(modglm)
+
+modglm2 <- lmer(Mean_nest_dist_log~   SPEI_har_pond + PRODUCTION_envol + CHICKAGE +
+                  (1|device) , data = test, REML = T, na.action = na.fail)
+confint(modglm2, oldNames=FALSE) #CHICKAGE ESTIMATE NULL
+summary(modglm2)
+r.squaredGLMM(modglm2)
+#marginal gain
+
+modglm3 <- lmer(Mean_nest_dist_log~  SPEI_har_pond + PRODUCTION_envol + SEXE +
+                  (1|device), data = test, REML = T, na.action = na.fail)
+confint(modglm3, oldNames=FALSE) #SEX estimate NULL
+summary(modglm3)
+r.squaredGLMM(modglm3)
+
+```
+###  Model validation: assumption checking
+
+```{r}
+#selected model
+#REML = T for model validation (provides less biased estimates of the variance components)
+modok <- lmer(Mean_nest_dist_log~ SPEI_har_pond + PRODUCTION_envol +
+                  (1|device), data = test, REML = T, na.action = na.fail)
+AICc(modok)#183.0606
+
+# 1. Marginal means
+emm <- emmeans(modok, ~ PRODUCTION_envol)
+
+# 2. Pairs comparisons(correction de Tukey)
+contrasts_prod <- pairs(emm, adjust = "tukey")
+
+# 3.  IC95% + tests
+summary(contrasts_prod, infer = c(TRUE, TRUE))
+
+#residuals (normality and independance)
+qqnorm(resid(modok))
+
+qqline(resid(modok)) #ok for residuals normality
+#idem
+hist(residuals(modok))
+
+# residuals vs fitted (homoscedasticity)
+plot(residuals(modok)~fitted(modok)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok for independance: no pattern
+
+
+#residuals against factors (relationship linearity and variance equality)
+plot(residuals(modok)~ test$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+#marginal and conditional R-squared values 
+r.squaredGLMM(modok)
+
+#IConfidence interval (95%) for each variable
+confint(modok, oldNames=FALSE)
+
+#Homoscedasticity Breusch-Pagan test
+# Model residuals
+residus <- resid(modok)
+# bptest(resid)
+
+#Regression residuals - variables
+lm_resid <- lm(residus^2 ~ SPEI_har_pond + SEXE + CHICKAGE, data = test)
+
+# Effectuer le test Breusch-Pagan
+bptest(lm_resid)
+#ok ! p>0.005
+
+summary(modok)
+
+#PLot it
+plot(residuals(modok)~ test$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+plot(modok)
+```
+
+### Model representation
+```{r}
+#Remove random variable
+modok1 <- lm(Mean_nest_dist_log~ SPEI_har_pond + PRODUCTION_envol, data = test, REML = T, na.action = na.fail)
+
+# Predictions
+eff_spei <- ggpredict(modok1, terms = "SPEI_har_pond")
+
+# Visualisation
+ggplot() +
+  geom_point(data = test, aes(x = SPEI_har_pond, y = Mean_nest_dist_log), 
+             alpha = 0.4, color = "black", shape = 16) +
+  geom_line(data = eff_spei, aes(x = x, y = predicted), 
+            color = "black", size = 1) +
+  geom_ribbon(data = eff_spei, aes(x = x, ymin = conf.low, ymax = conf.high), 
+              fill = "deepskyblue", alpha = 0.2) +
+  labs(
+    title = "Distance ~ SPEI (effet marginal sur PRODUCTION)",
+    x = "SPEI",
+    y = "Distance log(m)"
+  ) +
+  theme_classic()
+
+
+# Marginal effect of PRODUCTION_envol
+eff_prod <- ggpredict(modok, terms = "PRODUCTION_envol")
+ggplot() +
+  geom_jitter(data = test, aes(x = as.factor(PRODUCTION_envol), y = Mean_nest_dist_log),
+              width = 0.2, alpha = 0.5, color = "grey34", shape = 16) +  # Points observés
+  geom_pointrange(data = eff_prod, 
+                  aes(x = x, y = predicted, ymin = conf.low, ymax = conf.high),
+                  color = "black", size = 1) +
+  labs(
+    title = "Dist~Production",
+    x = "Nb fledglings",
+    y = "Distance log() (m)"
+  ) +
+  theme_classic()
+
+
+# Prédictions du modèle
+eff_modok <- ggpredict(modok1, terms = c("SPEI_har_pond", "PRODUCTION_envol"))
+eff_modok$PRODUCTION_envol <- eff_modok$group
+
+# Graphique avec points individuels
+ggplot() +
+  geom_point(data = test, aes(x = SPEI_har_pond, y = Mean_nest_dist_log), 
+             alpha = 0.5, color = "black", shape = 16, size = 0.8) +  # Points bruts
+  geom_line(data = eff_modok, aes(x = x, y = predicted), color = "black", size = 0.6) +  # Courbe prédite
+  geom_ribbon(data = eff_modok, aes(x = x, ymin = conf.low, ymax = conf.high), 
+              fill = "deepskyblue", alpha = 0.2) +  # IC95% crés par ggpredict
+  labs(
+    title = "HR~SPEI",
+    x = "SPEI",
+    y = "Mean_nest_dist_log"
+  ) +
+  facet_wrap(vars(PRODUCTION_envol))+
+  theme_classic()
+```
+# Home range size (KDE95)
+
+### Prepare DATA
+
+```{r}
+data1 <- read.csv2("matrice_ciccic_2025all.csv", header = TRUE)
+#79 periods
+
+colnames(data1)[colnames(data1) == "SEXE"] <- "SEX"
+colnames(data1)[colnames(data1) == "Hrker_foraging_hadjust"] <- "HR_ker95ha"
+
+data <-
+  data1[, c(
+    "device",
+    "ID",
+    "id_30",
+    "Deviceyear",
+    "HR_ker95ha",
+    "POP",
+    "SEX",
+    "PRODUCTION_envol",
+    "CHICKAGE",
+    "SPEI_har_pond"
+  )]
+
+
+#Convert into the good type
+data <- data %>%
+  mutate(across(c(POP, SEX, PRODUCTION_envol, CHICKAGE, id_30, device), as.factor))
+data$SPEI_har_pond <- as.numeric(data$SPEI_har_pond)
+data$HR_ker95ha <- as.numeric(data$HR_ker95ha)
+#no scaling
+
+table(data$PRODUCTION_envol)
+# Only one individual has 5 chicks :add it to the 4+ class
+data$PRODUCTION_envol <-
+  ifelse(
+    data$PRODUCTION_envol == 4 |
+      data$PRODUCTION_envol == 5,
+    "4+",
+    as.character(data$PRODUCTION_envol)
+  )
+data$PRODUCTION_envol <- as.factor(data$PRODUCTION_envol)
+summary(data)
+```
+
+
+
+### Y distribution
+
+```{r}
+test <- data
+#Check for missing values
+colSums(is.na(test))
+
+#Y distribution
+
+par(mfrow=c(2,2))
+# Boxplot
+boxplot(test$HR_ker95ha,col='blue',ylab='Monthly home range size (Ker95)')
+# Cleveland plot
+dotchart(test$HR_ker95ha,pch=16,col='blue',xlab='Monthly home range size (Ker95)')
+# Histogram
+hist(test$HR_ker95ha,col='blue',xlab="Monthly home range size (Ker95)",main="")
+# Quantile-Quantile plot
+qqnorm(test$HR_ker95ha,pch=16,col='blue',xlab='')
+qqline(test$HR_ker95ha,col='red')
+# Non normal
+shapiro.test(test$HR_ker95ha) #W = 0.58959, p-value = 1.588e-13 Non normal law (chi2 ? Gamma ?)
+##Outlier
+```
+
+### Potential relationships between Xs and Y
+
+```{r}
+par(mfrow=c(1,4))
+
+# SPEI
+plot(test$HR_ker95ha~test$SPEI_har_pond,pch=16,col='blue',xlab='SPEI',ylab='HR95 Kernel')
+
+# Production
+boxplot(HR_ker95ha ~ PRODUCTION_envol, data = test, main = "HR95 Kernel")
+# sex
+boxplot(HR_ker95ha ~ SEX, data = test, col = c('blue3','red2'), main = "HR95 Kernel")
+# Chick age
+boxplot(HR_ker95ha ~ CHICKAGE, data = test, col = c('blue3','red2'), main = "HR95 Kernel")
+```
+
+### Log transformation 
+
+Previous model selection and validation showed heteroskedasticity.
+GAM were tested but 
+Edf = 1 --\> linear relationship --\> LMM
+
+```{r}
+
+#log transformation needed
+test$HR_ker95ha_log <- log(test$HR_ker95ha)
+
+par(mfrow=c(2,2))
+# Boxplot
+boxplot(test$HR_ker95ha_log,col='blue',ylab='Monthly home range size (Ker95)')
+# Cleveland plot
+dotchart(test$HR_ker95ha_log,pch=16,col='blue',xlab='Monthly home range size (Ker95)')
+# Histogram
+hist(test$HR_ker95ha_log,col='blue',xlab="Monthly home range size (Ker95)",main="")
+# Quantile-Quantile plot
+qqnorm(test$HR_ker95ha_log,pch=16,col='blue',xlab='')
+qqline(test$HR_ker95ha_log,col='red')
+# Non normal
+shapiro.test(test$HR_ker95ha_log)#W = 0.97224, p-value = 0.082437 normal distribution
+##it has removed the outlier
+```
+
+### Model selection
+
+HR size ker 95% (logtransformed) ~
+SPEI +
+BROOD AGE +
+SEX +
+BROOD SIZE +
+SPEI*SEX +
+SPEI*BROOD AGE +
+SPEI*BROOD SIZE +
+r(ind/pop)
+
+
+```{r}
+#LM, constant model
+mod <- lm(HR_ker95ha_log~1, data = test)
+AICc(mod)#284.4093
+
+#LMM, full model
+modglm <- lmer(HR_ker95ha_log ~  SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol + SPEI_har_pond *
+    SEX + (1 | POP / device),
+  data = test, REML = F
+)
+AICc(modglm) #282.0735
+r.squaredGLMM(modglm)
+
+#change the random effect
+mod11 <- 
+ lmer(HR_ker95ha_log ~  SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol + SPEI_har_pond *
+    SEX + (1 | device),
+  data = test, REML = F
+)
+AICc(mod11) # better
+
+mod12 <- 
+  lmer(HR_ker95ha_log ~  SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol + SPEI_har_pond *
+    SEX + (1 | POP ),
+  data = test, REML = F
+)
+AICc(mod12) #286.4419 no
+
+#no random effect
+mod2 <- lm(
+ HR_ker95ha_log ~  SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol + SPEI_har_pond *
+    SEX ,
+  data = test
+)
+AICc(mod2)#288.583 no
+
+#Parcimony : device kept
+
+#########################################
+
+#Selection with Dredge
+fullmod <- lmer(
+ HR_ker95ha_log ~  SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol + SPEI_har_pond *
+    SEX + (1 | device), data = test, REML = F, na.action = na.fail)
+Dredge <- dredge(fullmod)
+
+#7 models delta AIcc <2
+
+mods <- get.models(Dredge, subset = 1:7)  
+
+r2_list <- lapply(mods, r.squaredGLMM)
+r2_df <- do.call(rbind, r2_list)
+r2_df <- cbind(Model = names(mods), r2_df)
+print(r2_df)
+
+#Estimate null for added variable? 
+modglm <- lmer(
+ HR_ker95ha_log ~  SPEI_har_pond + PRODUCTION_envol + (1 | device), data = test, REML = F, na.action = na.fail)
+confint(modglm, oldNames=FALSE) #PRODUCTION ESTIMATE NULL for 2 and 3
+summary(modglm)
+r.squaredGLMM(modglm)
+#           R2m       R2c
+# [1,] 0.117577 0.4719847
+anova(modglm)
+
+modglm <- lmer(
+ HR_ker95ha_log ~  SPEI_har_pond + (1 | device), data = test, REML = F, na.action = na.fail)
+confint(modglm, oldNames=FALSE)
+summary(modglm)
+r.squaredGLMM(modglm)
+            # R2m       R2c
+# [1,] 0.03794475 0.4704637 (0.0015 de moins que le précédent)
+anova(modglm)
+
+modglm <- lmer(
+ HR_ker95ha_log ~  SPEI_har_pond + SEX+ (1 | device), data = test, REML = F, na.action = na.fail)
+confint(modglm, oldNames=FALSE) #SEX ESTIMATE NULL 
+summary(modglm)
+r.squaredGLMM(modglm)
+#             R2m       R2c
+# [1,] 0.09067565 0.4671557(0.004829 de - que le premier)
+
+modglm <- lmer(
+ HR_ker95ha_log ~  SPEI_har_pond + PRODUCTION_envol + CHICKAGE + (1 | device), data = test, REML = F, na.action = na.fail)
+confint(modglm, oldNames=FALSE) # ESTIMATE NULL CHICKAGE
+summary(modglm)
+r.squaredGLMM(modglm)
+
+modglm <- lmer(
+ HR_ker95ha_log ~  PRODUCTION_envol + (1 | device), data = test, REML = F, na.action = na.fail)
+confint(modglm, oldNames=FALSE) #PRODUCTION ESTIMATE NULL pour 2 et 3
+summary(modglm)
+r.squaredGLMM(modglm)
+#             R2m       R2c
+# [1,] 0.08835686 0.4385739
+
+modglm <- lmer(
+ HR_ker95ha_log ~  SPEI_har_pond + PRODUCTION_envol + SEX + (1 | device), data = test, REML = F, na.action = na.fail)
+confint(modglm, oldNames=FALSE) #PRODUCTION ESTIMATE NULL pour 2 et 3, Idem for SEX
+r.squaredGLMM(modglm)
+#            R2m       R2c
+# [1,] 0.1532502 0.4810859 (0.0091012 de + que le premier pour R²C mais 0.0356732 de + pour R²m)
+
+modglm <- lmer(
+ HR_ker95ha_log ~  SPEI_har_pond + CHICKAGE + (1 | device), data = test, REML = F, na.action = na.fail)
+confint(modglm, oldNames=FALSE) #PRODUCTION ESTIMATE NULL pour CHICKAGE
+r.squaredGLMM(modglm)
+```
+### Model validation: assumption checking
+
+```{r}
+
+#selected model
+#REML = T for model validation (provides less biased estimates of the variance components)
+modok <- lmer(HR_ker95ha_log~ SPEI_har_pond + PRODUCTION_envol +
+                  (1|device), data = test, REML = T, na.action = na.fail)
+AICc(modok)
+
+# Marginal means
+emm <- emmeans(modok, ~ PRODUCTION_envol)
+
+# Pars comaprison  (correction Tukey)
+contrasts_prod <- pairs(emm, adjust = "tukey")
+summary(contrasts_prod, infer = c(TRUE, TRUE))
+cld(emm, Letters = letters, adjust = "tukey")
+
+#residuals (normality and independance)
+qqnorm(resid(modok))
+
+qqline(resid(modok)) #ok for residuals normality
+#idem
+hist(residuals(modok))
+
+# residuals vs fitted (homoscedasticity)
+plot(residuals(modok)~fitted(modok)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok for independance: no pattern
+
+
+#residuals against factors (relationship linearity and variance equality)
+plot(residuals(modok)~ test$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+#marginal and conditional R-squared values 
+r.squaredGLMM(modok)
+
+#IConfidence interval (95%) for each variable
+confint(modok, oldNames=FALSE)
+
+#Homoscedasticity Breusch-Pagan test
+# Model residuals
+residus <- resid(modok)
+# bptest(resid)
+
+#Regression residuals - variables
+lm_resid <- lm(residus^2 ~ SPEI_har_pond + PRODUCTION_envol, data = test)
+
+# Effectuer le test Breusch-Pagan
+bptest(lm_resid)
+#ok ! p>0.005
+
+summary(modok)
+
+#PLot it
+plot(residuals(modok)~ test$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+plot(modok)
+```
+### Model representation
+```{r}
+
+# Prédictions du modèle
+eff_spei <- ggpredict(modok, terms = "SPEI_har_pond")
+
+# Graphique avec points individuels
+ggplot() +
+  geom_point(data = test, aes(x = SPEI_har_pond, y = HR_ker95ha_log), 
+             alpha = 0.4, color = "black", shape = 16) +  # Points bruts
+  geom_line(data = eff_spei, aes(x = x, y = predicted), color = "black", size = 1) +  # Courbe prédite
+  geom_ribbon(data = eff_spei, aes(x = x, ymin = conf.low, ymax = conf.high), 
+              fill = "deepskyblue", alpha = 0.2) +  # IC95% crés par ggpredict
+  labs(
+    title = "HR~SPEI",
+    x = "SPEI",
+    y = "HRker(log)"
+  ) +
+  theme_classic()
+
+#prediction for average production effect (instead of setting the reference = 1)
+eff_spei <- ggemmeans(modok, terms = "SPEI_har_pond") 
+
+# Visualisation
+ggplot() +
+  geom_point(data = test, aes(x = SPEI_har_pond, y = HR_ker95ha_log), 
+             alpha = 0.4, color = "black", shape = 16) +
+  geom_line(data = eff_spei, aes(x = x, y = predicted), 
+            color = "black", size = 1) +
+  geom_ribbon(data = eff_spei, aes(x = x, ymin = conf.low, ymax = conf.high), 
+              fill = "deepskyblue", alpha = 0.2) +
+  labs(
+    title = "HR ~ SPEI (effet marginal sur PRODUCTION)",
+    x = "SPEI",
+    y = "HR log(m)"
+  ) +
+  theme_classic()
+
+
+eff_prod <- ggpredict(modok, terms = "PRODUCTION_envol")
+ggplot() +
+  geom_jitter(data = test, aes(x = as.factor(PRODUCTION_envol), y = HR_ker95ha_log),
+              width = 0.2, alpha = 0.5, color = "grey34", shape = 16) +  # Points observés
+  geom_pointrange(data = eff_prod, 
+                  aes(x = x, y = predicted, ymin = conf.low, ymax = conf.high),
+                  color = "black", size = 1) +
+  labs(
+    title = "HR~Production",
+    x = "Nb fledglings",
+    y = "HRker(log)"
+  ) +
+  theme_classic()
+
+
+# Prédictions du modèle
+eff_modok <- ggpredict(modok, terms = c("SPEI_har_pond", "PRODUCTION_envol"))
+eff_modok$PRODUCTION_envol <- eff_modok$group
+
+# Graphique avec points individuels
+ggplot() +
+  geom_point(data = test, aes(x = SPEI_har_pond, y = HR_ker95ha_log), 
+             alpha = 0.5, color = "black", shape = 16, size = 0.8) +  # Points bruts
+  geom_line(data = eff_modok, aes(x = x, y = predicted), color = "black", size = 0.6) +  # Courbe prédite
+  geom_ribbon(data = eff_modok, aes(x = x, ymin = conf.low, ymax = conf.high), 
+              fill = "deepskyblue", alpha = 0.2) +  # IC95% crés par ggpredict
+  labs(
+    title = "HR~SPEI",
+    x = "SPEI",
+    y = "HRker(log)"
+  ) +
+  facet_wrap(vars(PRODUCTION_envol))+
+  theme_classic()
+
+```
+
+# Daily ODBA
+
+### Prepare DATA
+
+```{r}
+
+data1 <- read.csv2("matrice_ciccic_2025all.csv", header = TRUE)
+#79 periods
+colnames(data1)[colnames(data1) == "SEXE"] <- "SEX"
+data1$daily_mean_ODBA <- data1$ODBA.mG.
+
+#Convert into the good type
+data1 <- data1 %>%
+  mutate(across(c(Deviceyear, id_30, POP, SEX, PRODUCTION_envol, CHICKAGE, device), as.factor))
+
+data1$SPEI_har_pond <- as.numeric(data1$SPEI_har_pond)
+#no need to scale
+data <- data1
+
+table(data$PRODUCTION_envol)
+# Only one individual has 5 chicks :add it to the 4+ class
+data$PRODUCTION_envol <- ifelse(data$PRODUCTION_envol == 4 | data$PRODUCTION_envol == 5, "4+", as.character(data$PRODUCTION_envol))
+data <- data %>%
+  mutate(across(c(POP, SEX, PRODUCTION_envol, CHICKAGE), as.factor)) %>%
+  mutate(across(c(SPEI_har_pond, daily_mean_ODBA), as.numeric))
+
+summary(data)
+```
+
+
+### Y distribution
+
+```{r}
+test <- data
+summary(test)
+test$daily_mean_ODBA_log <- log(test$daily_mean_ODBA)#si besoin
+
+#Check for missing values
+colSums(is.na(test))
+
+#Y distribution
+
+par(mfrow=c(2,2))
+# Boxplot
+boxplot(test$daily_mean_ODBA,col='blue',ylab='Monthly mean of the daily mean ODBA')
+# Cleveland plot
+dotchart(test$daily_mean_ODBA,pch=16,col='blue',xlab='Monthly mean of the daily mean ODBA')
+# Histogram
+hist(test$daily_mean_ODBA,col='blue',xlab="Monthly mean of the daily mean ODBA",main="")
+# Quantile-Quantile plot
+qqnorm(test$daily_mean_ODBA,pch=16,col='blue',xlab='')
+qqline(test$daily_mean_ODBA,col='red')
+# Non normal
+shapiro.test(test$daily_mean_ODBA) # Non normal law
+#No outlier
+```
+
+### Potential relationships between Xs and Y
+
+
+```{r}
+par(mfrow=c(1,4))
+
+# SPEI
+plot(test$daily_mean_ODBA~test$SPEI_har_pond,pch=16,col='blue',xlab='SPEI',ylab='Monthly mean of the daily Odba')
+
+# Production
+boxplot(daily_mean_ODBA ~ PRODUCTION_envol, data = test, main = "Monthly mean of the daily Odba")
+# sex
+boxplot(daily_mean_ODBA ~ SEX, data = test, col = c('blue3','red2'), main = "Monthly mean of the daily Odba")
+# Chick age
+boxplot(daily_mean_ODBA ~ CHICKAGE, data = test, col = c('blue3','red2'), main = "Monthly mean of the daily Odba")
+```
+
+### Model selection
+
+ODBA ~
+SPEI +
+BROOD AGE +
+SEX +
+BROOD SIZE +
+SPEI*SEX +
+SPEI*BROOD AGE +
+SPEI*BROOD SIZE +
+r(ind/pop)
+
+```{r}
+
+#LM, constant model
+mod <- lm(daily_mean_ODBA~1, data = test)
+AICc(mod)#866.7783
+
+#Full model
+modglmfull <- lmer(daily_mean_ODBA~  SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol + SPEI_har_pond *
+    SEX + (1 | POP / device),
+  data = test, REML = F, na.action = na.fail) # !!! singular
+AICc(modglmfull)# 827.0794
+r.squaredGLMM(modglmfull)
+
+#change random effect
+modglm1 <- lmer(daily_mean_ODBA~  SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol + SPEI_har_pond *
+    SEX + (1 | device),
+  data = test, REML = F, na.action = na.fail)
+AICc(modglm1)# 826.5117
+r.squaredGLMM(modglm1)
+
+modglm2 <- lmer(daily_mean_ODBA~  SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol + SPEI_har_pond *
+    SEX + (1 | POP ),
+  data = test, REML = F, na.action = na.fail)
+AICc(modglm2)# 824.0229
+r.squaredGLMM(modglm2)
+
+#delete interaction
+modglm2 <- lmer(daily_mean_ODBA~  SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol +
+    SEX + (1 | POP ),
+  data = test, REML = F, na.action = na.fail)
+AICc(modglm2)# 822.1995 better
+r.squaredGLMM(modglm2)
+
+modglm2 <- lmer(daily_mean_ODBA~  SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol +
+    SEX + (1 | device ),
+  data = test, REML = F, na.action = na.fail)
+AICc(modglm2)# 824.4128
+r.squaredGLMM(modglm2)
+
+#no random
+modglm3 <- lm(daily_mean_ODBA~  SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol + SPEI_har_pond *
+    SEX ,
+  data = test, na.action = na.fail)
+AICc(modglm3)# 825.4006
+r.squaredGLMM(modglm3)
+
+#random additif
+modglm4 <- lmer(
+  daily_mean_ODBA ~ SPEI_har_pond * CHICKAGE +
+                    SPEI_har_pond * PRODUCTION_envol +
+                    SPEI_har_pond * SEX +
+                    (1 | POP) + (1 | device),
+  data = test,
+  REML = FALSE,
+  na.action = na.fail
+)  # !!! SINGULAR
+AICc(modglm4)#827.0794
+r.squaredGLMM(modglm4)
+
+#Meilleur = only POP
+# delta AICc <2 with no random
+
+anova(modglm1, modglm2, modglm3)
+Anova(modglm1,type = "II")
+
+#Residuals independance ?
+
+test$resid <- resid(modglm1)
+
+ggplot(test, aes(x = device, y = resid)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Distribution des résidus par indiv", y = "Résidus")
+
+test$resid <- resid(modglm2)
+
+ggplot(test, aes(x = POP, y = resid)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Distribution des résidus par indiv", y = "Résidus")
+
+#residuals (normality and independance)
+qqnorm(resid(modglm1))
+qqline(resid(modglm1)) #ok for residuals normality
+#idem
+hist(residuals(modglm1))
+
+#residuals (normality and independance)
+qqnorm(resid(modglm2))
+qqline(resid(modglm2)) #ok for residuals normality
+#idem
+hist(residuals(modglm2))
+
+#residuals (normality and independance)
+qqnorm(resid(modglm3))
+qqline(resid(modglm3)) #ok for residuals normality
+#idem
+hist(residuals(modglm3))
+
+# The ICC can be interpreted as "the proportion of the variance explained by the grouping structure in the population".
+
+# This index goes from 0, if the grouping conveys no information, to 1, if all observations in a group are identical (Gelman and Hill, 2007, p. 258). In other word, the ICC - sometimes conceptualized as the measurement repeatability - "can also be interpreted as the expected correlation between two randomly drawn units that are in the same group" (Hox 2010: 15),
+
+# icc() calculates an adjusted and an unadjusted ICC, which both take all sources of uncertainty (i.e. of all random effects) into account. While the adjusted ICC only relates to the random effects, the unadjusted ICC also takes the fixed effects variances into account, more precisely, the fixed effects variance is added to the denominator of the formula to calculate the ICC (see Nakagawa et al. 2017).
+
+performance::icc(modglm2)
+performance::icc(modglm1)
+performance::icc(modglm3)
+performance::icc(modglm4)
+
+# Add residuals
+test$resid_mod1 <- resid(modglm1)
+test$resid_mod2 <- resid(modglm2)
+test$resid_mod3 <- resid(modglm3)
+
+# Résiduals per group
+ggplot(test, aes(x = POP, y = resid_mod2)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Résidus du modèle modglm2 par POP", y = "Résidus")
+
+ggplot(test, aes(x = device, y = resid_mod1)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Résidus du modèle modglm2 par POP", y = "Résidus")
+
+
+#########################################
+
+
+#Selection with Dredge
+fullmod <- lmer(
+ daily_mean_ODBA ~  SPEI_har_pond * CHICKAGE + SPEI_har_pond * PRODUCTION_envol + SPEI_har_pond *
+    SEX + (1 | POP), data = test, REML = F, na.action = na.fail)
+Dredge <- dredge(fullmod)
+
+#2 models delta AIcc <2
+
+#Chickage + production + sex
+#Chickage + production + sex + spei
+
+modglm <- lmer(
+ daily_mean_ODBA ~   CHICKAGE + PRODUCTION_envol + SEX + (1 | POP), data = test, na.action = na.fail)
+
+confint(modglm, oldNames=FALSE) #Estimate NULL for production 4+ and for SEX and CHICKGE
+summary(modglm)
+r.squaredGLMM(modglm)
+#           R2m       R2c
+# [1,] 0.5115765 0.5692271
+
+modglm <- lmer(
+ daily_mean_ODBA ~   CHICKAGE + PRODUCTION_envol + SEX + SPEI_har_pond + (1 | POP), data = test, na.action = na.fail)
+
+confint(modglm, oldNames=FALSE) #Estimate NULL for SPEI
+summary(modglm)
+r.squaredGLMM(modglm)
+#            R2m       R2c
+# [1,] 0.5384525 0.5384525 (0.0062756 de + for R²m)
+
+mods <- get.models(Dredge, subset = 1:2)  
+r2_list <- lapply(mods, r.squaredGLMM)
+r2_df <- do.call(rbind, r2_list)
+r2_df <- cbind(Model = names(mods), r2_df)
+print(r2_df)
+
+summary(model.avg(Dredge, subset = delta<2))
+```
+
+### Model validation: assumption checking
+
+```{r}
+#selected model
+#REML = T for model validation (provides less biased estimates of the variance components)
+modok <- lmer(
+ daily_mean_ODBA ~   CHICKAGE + PRODUCTION_envol + SEX + (1|POP), data = test, REML = T, na.action = na.fail)
+AICc(modok)#777.5251
+
+emm <- emmeans(modok, ~ PRODUCTION_envol)
+pairs(emm, adjust = "tukey")
+summary(emm, infer = c(TRUE, TRUE)) 
+contrasts_prod <- contrast(emmeans(modok, ~ PRODUCTION_envol), method = "pairwise")
+summary(contrasts_prod, infer = c(TRUE, TRUE))
+
+
+# 1. Marginal means
+emm <- emmeans(modok, ~ PRODUCTION_envol)
+
+# 2. Par comparison (correction = Tukey)
+contrasts_prod <- pairs(emm, adjust = "tukey")
+summary(contrasts_prod, infer = c(TRUE, TRUE))
+
+#residuals (normality and independance)
+qqnorm(resid(modok))
+
+qqline(resid(modok)) #ok for residuals normality
+#idem
+hist(residuals(modok))
+
+# residuals vs fitted (homoscedasticity)
+plot(residuals(modok)~fitted(modok)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok for independance: no pattern
+
+
+#residuals against factors (relationship linearity and variance equality)
+plot(residuals(modok)~ test$CHICKAGE,
+         ylab = "Residuals",
+         xlab = "CHICKAGE",
+         main = "")
+abline(h = 0)
+
+plot(residuals(modok)~ test$SEX,
+         ylab = "Residuals",
+         xlab = "SEX",
+         main = "")
+abline(h = 0)
+
+plot(residuals(modok)~ test$PRODUCTION_envol,
+         ylab = "Residuals",
+         xlab = "PRODUCTION_envol",
+         main = "")
+abline(h = 0)
+
+#marginal and conditional R-squared values 
+r.squaredGLMM(modok)
+#IConfidence interval (95%) for each variable
+confint(modok, oldNames=FALSE)
+
+#Homoscedasticity Breusch-Pagan test
+# Model residuals
+residus <- resid(modok)
+# bptest(resid)
+
+#Regression residuals - variables
+lm_resid <- lm(residus^2 ~SEX + CHICKAGE + PRODUCTION_envol, data = test)
+
+# Effectuer le test Breusch-Pagan
+bptest(lm_resid)
+#ok ! p>0.005
+```
+
+### Model representation
+```{r}
+#Remove random variable
+modok <- lm(daily_mean_ODBA~ CHICKAGE + SEX + PRODUCTION_envol, data = test, REML = T, na.action = na.fail)
+
+# Effet marginal de PRODUCTION_envol
+eff_prod <- ggpredict(modok, terms = "PRODUCTION_envol")
+ggplot() +
+  geom_jitter(data = test, aes(x = as.factor(PRODUCTION_envol), y = daily_mean_ODBA),
+              width = 0.2, alpha = 0.5, color = "gray40") +  # Points observés
+  geom_pointrange(data = eff_prod, 
+                  aes(x = x, y = predicted, ymin = conf.low, ymax = conf.high),
+                  color = "black", size = 1) +
+  labs(
+    title = "ODBA~production",
+    x = "Nb fledglings",
+    y = "daily mean ODBA"
+  ) +
+  theme_classic()
+
+eff_prod <- ggpredict(modok, terms = "SEX")
+ggplot() +
+  geom_jitter(data = test, aes(x = as.factor(SEX), y = daily_mean_ODBA),
+              width = 0.2, alpha = 0.5, color = "gray40") +  # Points observés
+  geom_pointrange(data = eff_prod, 
+                  aes(x = x, y = predicted, ymin = conf.low, ymax = conf.high),
+                  color = "black", size = 1) +
+  labs(
+    title = "ODBA~SEX",
+    x = "SEX",
+    y = "daily mean ODBA"
+  ) +
+  theme_classic()
+
+
+eff_prod <- ggpredict(modok, terms = "CHICKAGE")
+
+ggplot() +
+  geom_jitter(data = test, aes(x = as.factor(CHICKAGE), y = daily_mean_ODBA),
+              width = 0.2, alpha = 0.5, color = "gray40") +  # Points observés
+  geom_pointrange(data = eff_prod, 
+                  aes(x = x, y = predicted, ymin = conf.low, ymax = conf.high),
+                  color = "black", size = 1) +
+  labs(
+    title = "ODBA~CHICKAGE",
+    x = "MONTH",
+    y = "daily mean ODBA"
+  ) +
+  theme_classic()
+
+
+#all three
+effs <- ggpredict(modok, terms = c("CHICKAGE", "SEX", "PRODUCTION_envol"))
+plot(effs)
+
+#barplot
+ggplot(effs, aes(x = x, y = predicted, fill = group)) +
+  geom_col(position = position_dodge(width = 0.9), alpha = 0.7) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                width = 0.2,
+                position = position_dodge(width = 0.9)) +
+  facet_wrap(~facet, scales = "free_x") +
+  labs(
+    x = NULL,
+    y = "Predicted daily mean ODBA",
+    fill = "Group"
+  ) +
+  theme_classic(base_size = 14)
+
+test$facet <- test$PRODUCTION_envol
+
+# Tracer les effets dotplot avec IC
+ggplot(effs, aes(x = x, y = predicted, color = group)) +
+  # Valeurs brutes en arrière-plan
+  geom_jitter(
+    data = test,
+    aes(x = as.factor(CHICKAGE), y = daily_mean_ODBA, color = SEX),  # adapte les variables selon le facet
+    inherit.aes = FALSE,
+    alpha = 0.8,
+    width = 0.2,
+    shape = 16, size = 0.8
+  ) +
+  # Effets estimés + IC
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high),
+                  position = position_dodge(width = 0.5),
+                  size = 1.2, fatten = 1.3) +
+  facet_wrap(~facet, scales = "free_x") +
+  scale_color_manual(
+    values = c("F" = "red", "M" = "deepskyblue")  # adapte selon les niveaux de 'group'
+  ) +
+  labs(
+    x = NULL,
+    y = "Predicted daily mean ODBA",
+    color = NULL
+  ) +
+  theme_classic(base_size = 14)
+
+```
+
+# % foraging
+
+### Prepare DATA
+
+```{r}
+
+data1 <- read.csv2("matrice_ciccic_2025all.csv", header = TRUE)
+#79 periods
+
+colnames(data1)[colnames(data1) == "SEXE"] <- "SEX"
+colnames(data1)[colnames(data1) == "n_all_bhv"] <- "tot_month_activity"
+colnames(data1)[colnames(data1) == "n_foraging"] <- "tot_month_foraging"
+colnames(data1)[colnames(data1) == "prop_for_month"] <- "mean_.foraging"
+
+
+data <-
+  data1[, c(
+    "device",
+    "ID",
+    "id_30",
+    "mean_.foraging",
+    "Deviceyear",
+    "tot_month_activity",
+    "tot_month_foraging",
+    "POP",
+    "SEX",
+    "PRODUCTION_envol",
+    "CHICKAGE",
+    "SPEI_har_pond"
+  )]
+
+
+#Convert into the good type
+data <- data %>%
+  mutate(across(c(POP, SEX, PRODUCTION_envol, CHICKAGE, id_30, device), as.factor))
+  #standardize the numeric environmental variables
+data$SPEI_har_pond <- as.numeric(data$SPEI_har_pond)
+data$mean_.foraging <- as.numeric(data$mean_.foraging)
+
+#no scale
+
+#rename columns
+data <- data %>%
+  rename(prop_foraging = mean_.foraging)
+table(data$PRODUCTION_envol)
+# Only one individual has 5 chicks :add it to the 4+ class
+data$PRODUCTION_envol <-
+  ifelse(
+    data$PRODUCTION_envol == 4 |
+      data$PRODUCTION_envol == 5,
+    "4+",
+    as.character(data$PRODUCTION_envol)
+  )
+data$PRODUCTION_envol <- as.factor(data$PRODUCTION_envol)
+summary(data)
+```
+### Y Distribution
+
+```{r}
+test <-data
+ 
+#Check for missing values
+colSums(is.na(test))
+
+#Y distribution
+#Y between 0 and 1 (%)
+test$prop_foraging <- test$prop_foraging/100
+ratio <- cbind(test$tot_month_foraging, test$tot_month_activity-test$tot_month_foraging) #for the glm building
+
+par(mfrow=c(2,2))
+# Boxplot
+boxplot(test$prop_foraging,col='blue',ylab='Daily %of foraging')
+# Cleveland plot
+dotchart(test$prop_foraging,pch=16,col='blue',xlab='Monthly mean \n of the daily %of foraging')
+# Histogram
+hist(test$prop_foraging,col='blue',xlab="Monthly mean\n of the daily %of foraging",main="")
+# Quantile-Quantile plot
+qqnorm(test$prop_foraging,pch=16,col='blue',xlab='')
+qqline(test$prop_foraging,col='red')
+# Non normal
+shapiro.test(test$prop_foraging) #W = 0.97681, p-value = 0.1598 Normal law ok
+#No outlier
+```
+
+### Potential relationships between Xs and Y
+
+```{r}
+par(mfrow=c(1,4))
+
+# SPEI
+plot(
+  test$prop_foraging ~ test$SPEI_har_pond,
+  pch = 16,
+  col = 'blue',
+  xlab = 'SPEI',
+  ylab = 'Monthly mean of the daily %of foraging'
+)
+
+# Production
+boxplot(prop_foraging ~ PRODUCTION_envol,
+        data = test,
+        main = "Monthly mean of the daily %of foraging")
+# sex
+boxplot(
+  prop_foraging ~ SEX,
+  data = test,
+  col = c('blue3', 'red2'),
+  main = "Monthly mean of the daily %of foraging"
+)
+# Chick age
+boxplot(
+  prop_foraging ~ CHICKAGE,
+  data = test,
+  col = c('blue3', 'red2'),
+  main = "Monthly mean of the daily %of foragingt"
+)
+```
+### Model selection
+
+Preliminary iterative tests were used to select the most appropriate k value.
+
+mean daily distance from the nest (logtransformed) ~
+SPEI +
+BROOD AGE +
+SEX +
+BROOD SIZE +
+SPEI*SEX +
+SPEI*BROOD AGE +
+SPEI*BROOD SIZE +
+r(ind/pop)
+
+```{r}
+
+#change random structure
+modok <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=3) + SEX + CHICKAGE + PRODUCTION_envol,  random = list(POP = ~1|device),family = binomial(link = "logit"), method = "REML", data = test)
+AICc(modok) #792.537
+summary(modok$gam) #reff edf = 1
+summary(modok$gam)$p.table
+summary(modok$gam)$s.table
+VarCorr(modok$lme)
+summary(modok$lme)
+
+#not nested
+modok <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=3) + SEX + CHICKAGE + PRODUCTION_envol, random = list(POP = ~1, device = ~1),family = binomial(link = "logit"), method = "REML", data = test)
+AICc(modok) #437.7452
+
+modok <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=3) + SEX + CHICKAGE + PRODUCTION_envol, random = list(POP = ~1),family = binomial(link = "logit"), method = "REML", data = test)
+AICc(modok) #792.537
+
+modok <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=3) + SEX + CHICKAGE + PRODUCTION_envol, random = list(device = ~1),family = binomial(link = "logit"), method = "REML", data = test)
+AICc(modok) #435.1186 -> best one
+
+#no random
+modok <- gam(ratio ~ s(SPEI_har_pond, bs = "cr", k=3) + SEX + CHICKAGE + PRODUCTION_envol,family = binomial(link = "logit"), method = "REML", data = test)
+AICc(modok) # 1671.721
+
+#keep only device as random
+
+mod_base <- gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE + 
+    s(SPEI_har_pond, bs = "cr", k = 3),
+  random = list(device = ~1),
+  family = binomial(link = "logit"),
+  method = "REML",
+  data = test
+)
+AICc(mod_base)#435.1186
+summary(mod_base$gam)$p.table
+summary(mod_base$gam)$s.table
+
+
+#################### Fixed effects
+
+#Selection with Dredge
+fullmod <- uGamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=3) + SEX + CHICKAGE + PRODUCTION_envol, random = list(device = ~1),family = binomial(link = "logit"), method = "REML", data = test, na.action = na.fail)
+Dredge <- dredge(fullmod)
+
+#1 model Production, chickage, SPEI et SEX
+
+##########INTERACTIONS
+
+mod_ref <- gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE +
+    s(SPEI_har_pond, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+
+# Interaction with SEX
+mod_sex <- gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE +
+    s(SPEI_har_pond, by = SEX, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+
+# with PRODUCTION
+mod_prod <- gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE +
+    s(SPEI_har_pond, by = PRODUCTION_envol, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+# With CHICKAGE
+mod_age <- gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE +
+    s(SPEI_har_pond, by = CHICKAGE, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+AICc(mod_ref) #435.1186
+r.squaredGLMM(mod_ref$lme)
+#          R2m       R2c
+# [1,] 0.1159534 0.1560178
+         
+AICc(mod_base) #435.1
+r.squaredGLMM(mod_base$lme) #pareil
+
+AICc(mod_sex) #386.
+AICc(mod_prod) #331.
+AICc(mod_age) #417.
+#Interaction with production ok
+
+summary(mod_sex$gam)
+summary(mod_prod$gam)
+summary(mod_age$gam)
+
+#keep production
+# remove fixed effect?
+mod_prod1 <- gamm(
+  ratio ~ PRODUCTION_envol + CHICKAGE +
+    s(SPEI_har_pond, by = PRODUCTION_envol, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+
+mod_prod2 <- gamm(
+  ratio ~ CHICKAGE +
+    s(SPEI_har_pond, by = PRODUCTION_envol, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+
+mod_prod3 <- gamm(
+  ratio ~ PRODUCTION_envol +
+    s(SPEI_har_pond, by = PRODUCTION_envol, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+mod_prod4 <- gamm(
+  ratio ~ PRODUCTION_envol + SEX +
+    s(SPEI_har_pond, by = PRODUCTION_envol, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+mod_prod5 <- gamm(
+  ratio ~ CHICKAGE + SEX +
+    s(SPEI_har_pond, by = PRODUCTION_envol, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+mod_prod6 <- gamm(
+  ratio ~ SEX +
+    s(SPEI_har_pond, by = PRODUCTION_envol, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+mod_prod7 <- gamm(
+  ratio ~ PRODUCTION_envol + CHICKAGE + SEX +
+    s(SPEI_har_pond, by = PRODUCTION_envol, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+
+AICc(mod_prod1)
+AICc(mod_prod2)
+AICc(mod_prod3)
+AICc(mod_prod4)
+AICc(mod_prod5)
+AICc(mod_prod6)
+AICc(mod_prod7)
+
+summary(mod_prod1$gam)
+summary(mod_prod2$gam)
+summary(mod_prod3$gam)
+summary(mod_prod4$gam)
+summary(mod_prod5$gam)
+summary(mod_prod6$gam)
+
+#best model = full + interaction with production
+summary(mod_prod7$gam)
+library(gratia)
+
+#Interaction with sex
+mod_sex1 <- gamm(
+  ratio ~ PRODUCTION_envol + CHICKAGE +
+    s(SPEI_har_pond, by = SEX, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+
+mod_sex2 <- gamm(
+  ratio ~ CHICKAGE +
+    s(SPEI_har_pond, by = SEX, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+
+mod_sex3 <- gamm(
+  ratio ~ PRODUCTION_envol +
+    s(SPEI_har_pond, by = SEX, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+mod_sex4 <- gamm(
+  ratio ~ PRODUCTION_envol + SEX +
+    s(SPEI_har_pond, by = SEX, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+mod_sex5 <- gamm(
+  ratio ~ CHICKAGE + SEX +
+    s(SPEI_har_pond, by = SEX, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+mod_sex6 <- gamm(
+  ratio ~ SEX +
+    s(SPEI_har_pond, by = SEX, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+
+mod_sex7 <- gamm(
+  ratio ~ PRODUCTION_envol + CHICKAGE+ SEX +
+    s(SPEI_har_pond, by = SEX, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+
+AICc(mod_sex1)
+AICc(mod_sex2)
+AICc(mod_sex3)
+AICc(mod_sex4)
+AICc(mod_sex5)
+AICc(mod_sex6)
+AICc(mod_sex7)
+
+summary(mod_sex1$gam)
+summary(mod_sex2$gam)
+summary(mod_sex3$gam)
+summary(mod_sex4$gam)
+summary(mod_sex5$gam)
+summary(mod_sex6$gam)
+
+#Same full model + interaction with sex but production has better AICc
+
+#Interaction with AGE
+mod_age1 <- gamm(
+  ratio ~ PRODUCTION_envol + SEX +
+    s(SPEI_har_pond, by = CHICKAGE, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+
+mod_age2 <- gamm(
+  ratio ~ SEX +
+    s(SPEI_har_pond, by = CHICKAGE, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+
+mod_age3 <- gamm(
+  ratio ~ PRODUCTION_envol +
+    s(SPEI_har_pond, by = CHICKAGE, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+mod_age4 <- gamm(
+  ratio ~ PRODUCTION_envol + CHICKAGE +
+    s(SPEI_har_pond, by = CHICKAGE, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+mod_age5 <- gamm(
+  ratio ~ CHICKAGE + SEX +
+    s(SPEI_har_pond, by = CHICKAGE, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+mod_age6 <- gamm(
+  ratio ~ CHICKAGE +
+    s(SPEI_har_pond, by = CHICKAGE, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+
+mod_age7 <- gamm(
+  ratio ~ PRODUCTION_envol + CHICKAGE+ SEX +
+    s(SPEI_har_pond, by = CHICKAGE, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial, data = test
+)
+
+
+AICc(mod_age1)
+AICc(mod_age2)
+AICc(mod_age3)
+AICc(mod_age4)
+AICc(mod_age5)
+AICc(mod_age6)
+AICc(mod_age7)
+
+summary(mod_sex1$gam)
+summary(mod_sex2$gam)
+summary(mod_sex3$gam)
+summary(mod_sex4$gam)
+summary(mod_sex5$gam)
+summary(mod_sex6$gam)
+
+#Avec les interactions et + d'arguments
+#sex
+mod1 <- gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE +
+    s(SPEI_har_pond, by = SEX, bs = "cr", k = 3),
+  random = list(device = ~1),
+  family = binomial(link = "logit"),
+  method = "ML",
+  data = test,
+  na.action = na.fail
+)
+AICc(mod1) #386.1566 
+
+#production
+mod1 <- gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE +
+    s(SPEI_har_pond, by = PRODUCTION_envol, bs = "cr", k = 3),
+  random = list(device = ~1),
+  family = binomial(link = "logit"),
+  method = "ML",
+  data = test,
+  na.action = na.fail
+)
+AICc(mod1)#331.8276
+
+#chickage
+mod1 <- gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE +
+   s(SPEI_har_pond, by = CHICKAGE, bs = "cr", k = 3),
+  random = list(device = ~1),
+  family = binomial(link = "logit"),
+  method = "ML",
+  data = test,
+  na.action = na.fail
+)
+AICc(mod1) #417.8406
+
+#deux en même temps comme une seule entité : seule autorisée = sex + age
+
+test$group <- interaction(test$SEX, test$CHICKAGE)
+mod_comb <- gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE +
+    s(SPEI_har_pond, by = group, bs = "cr", k = 3),
+  random = list(device = ~1),
+  family = binomial(link = "logit"),
+  method = "ML",
+  data = test,
+  na.action = na.fail
+)
+AICc(mod_comb) #372.4301
+
+summary(mod_comb$lme)
+summary(mod_comb$gam)
+coef(mod_comb$gam)
+plot(mod_comb$gam, pages = 1) 
+
+library(gratia)
+draw(mod_comb$gam)
+
+
+#Based on https://bart-larsen.github.io/GAMM-Tutorial/ : 
+
+ # If you are interested in whether the smooths DIFFER between levels of the factor, which we usually do when testing for an interaction, the variable types and model specification matter! The factor must be specified as an ordered factor, and you must include a “main effect” smooth in the model. This fits a reference smooth at the first level of your factor and models smooths at the other levels as a comparison to the reference. 
+
+
+# When we care about significance testing, we should fit the smooths using unpenalized splines by setting fx = F
+
+test$Sex <- ordered(test$SEX, levels = c("F", "M")) # Females will be the reference group
+
+model_formula <- as.formula("ratio ~ Sex + s(SPEI_har_pond, k = 3, fx = T) + s(SPEI_har_pond, by = Sex, k = 3, fx = T)")
+# Note we keep fx = T for reliable p-values.
+
+model <- gamm(model_formula,
+              random = list(device=~1),
+              family = binomial(link = "logit"),
+              data = test)
+
+summary(model$gam)
+AICc(model) 
+BIC(model$lme) 
+
+test$Prod <- ordered(test$PRODUCTION_envol, levels = c("1", "2", "3", "4+")) 
+
+model_formula <- as.formula("ratio ~ Prod + s(SPEI_har_pond, k = 3, fx = T) + s(SPEI_har_pond, by =Prod, k = 3, fx = T)")
+# Note we keep fx = T for reliable p-values.
+
+model <- gamm(model_formula,
+              random = list(device=~1),
+              family = binomial(link = "logit"),
+              data = test)
+
+summary(model$gam)
+AICc(model) # 1878.318
+
+test$Sex <- ordered(test$SEX, levels = c("F", "M")) # Females will be the reference group
+
+model_formula <- as.formula("ratio ~ Sex + s(SPEI_har_pond, k = 3, fx = T) + s(SPEI_har_pond, by = Sex, k = 3, fx = T)")
+# Note we keep fx = T for reliable p-values.
+
+model <- gamm(model_formula,
+              random = list(device=~1),
+              family = binomial(link = "logit"),
+              data = test)
+
+summary(model$gam)
+AICc(model) 
+
+######## without interactions best modele = full modele
+
+modok <- gamm(ratio ~ s(SPEI_har_pond, bs = "cr", k=3) + SEX + CHICKAGE + PRODUCTION_envol, random = list(device = ~1),family = binomial(link = "logit"), method = "ML", data = test, na.action = na.fail)
+AICc(modok) 
+
+# With interactions best modele = full modele 
+
+# post-hoc comparisons for production factor
+
+# For mgcv::gamm objects, emmeans() results are based on the object$gam part. Unfortunately, that is missing its call component, so the user must supply it in the call argument (e.g., call = quote(gamm(y ~ s(x), data = dat))) or give the dataset in the data argument. Alternatively (and recommended), you may first set object$gam$call to the quoted call ahead of time. 
+
+mod_base <- gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE + 
+    s(SPEI_har_pond, bs = "cr", k = 3),
+  random = list(device = ~1),
+  family = binomial(link = "logit"),
+  method = "REML",
+  data = test
+)
+mod_prod7 <- gamm(
+  ratio ~ PRODUCTION_envol + CHICKAGE + SEX +
+    s(SPEI_har_pond, by = PRODUCTION_envol, bs = "cr", k = 3),
+  random = list(device = ~1), family = binomial(link = "logit"), data = test
+)
+
+
+mod_base$gam$call <- quote(gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE + 
+    s(SPEI_har_pond, bs = "cr", k = 3),
+  random = list(device = ~1),
+  family = binomial(link = "logit"),
+  method = "REML",
+  data = test
+))
+
+emmeans(mod_base$gam, ~ PRODUCTION_envol)
+emmeans(mod_base$gam, ~ PRODUCTION_envol, data = test)
+pairs(emmeans(mod_base$gam, ~ PRODUCTION_envol, data = test), adjust = "tukey")
+
+mod_prod7$gam$call <- quote(gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE + 
+    s(SPEI_har_pond, by = PRODUCTION_envol, bs = "cr", k = 3),
+  random = list(device = ~1),
+  family = binomial(link = "logit"),
+  method = "REML",
+  data = test
+))
+
+```
+
+### Model validation: assumption checking
+
+```{r}
+#selected model
+#REML = T for model validation (provides less biased estimates of the variance components)
+mod_base <- gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE + 
+    s(SPEI_har_pond, bs = "cr", k = 3),
+  random = list(device = ~1),
+  family = binomial(link = "logit"),
+  method = "REML",
+  data = test
+)
+AICc(mod_base)
+summary(mod_base$gam)$p.table
+summary(mod_base$gam)$s.table
+summary(mod_base$gam)
+
+#IC95 calculation
+coefs <- summary(mod_base$gam)$p.table
+CI <- cbind(
+  Estimate = coefs[, 1],
+  Lower = coefs[, 1] - 1.96 * coefs[, 2],
+  Upper = coefs[, 1] + 1.96 * coefs[, 2]
+)
+round(CI, 3)
+
+modok <- mod_base
+```
+
+```{r ResidNormGAM, include=TRUE, fig.height=3, fig.width=6}
+par(mfrow=c(1,2))
+# Histogram
+hist(modok$gam$residuals,col='blue',xlab="residuals",main="Check Normality")
+# Quantile-Quantile plot
+qqnorm(modok$gam$residuals,pch=16,col='blue',xlab='')
+qqline(modok$gam$residuals,col='red')
+
+
+#residuals (normality and independance)
+qqnorm(resid(modok$gam))
+
+qqline(resid(modok$gam)) #ok for residuals normality
+#idem
+hist(residuals(modok$gam))
+```
+
+```{r}
+# residuals vs fitted (homoscedasticity)
+plot(residuals(modok$gam)~fitted(modok$gam)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok for independance: no pattern
+
+
+#residuals against factors (relationship linearity and variance equality)
+plot(residuals(modok$gam)~ test$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+
+#residuals against factors 
+plot(residuals(modok$gam)~ test$PRODUCTION_envol,
+         ylab = "Residuals",
+         xlab = "production",
+         main = "")
+abline(h = 0)
+
+plot(residuals(modok$gam)~ test$SEX,
+         ylab = "Residuals",
+         xlab = "sex",
+         main = "")
+abline(h = 0)
+
+plot(residuals(modok$gam)~ test$CHICKAGE,
+         ylab = "Residuals",
+         xlab = "chickage",
+         main = "")
+abline(h = 0)
+
+#marginal and conditional R-squared values 
+r.squaredGLMM(modok$lme)
+
+#Homoscedasticity Breusch-Pagan test
+# Model residuals
+residus <- resid(modok$gam)
+# bptest(resid)
+
+#Regression residuals - variables
+lm_resid <- lm(residus^2 ~ SPEI_har_pond + SEX + CHICKAGE, data = test)
+
+#  test Breusch-Pagan
+bptest(lm_resid)
+#ok ! p>0.005
+
+summary(modok)
+
+#PLot it
+plot(residuals(modok$gam)~ test$SPEI_har_pond,
+         ylab = "Residuals",
+         xlab = "SPEI",
+         main = "")
+abline(h = 0)
+
+plot(modok$gam)
+
+appraise(modok$gam)
+```
+
+### Model representation
+```{r}
+
+#plot the spline
+gratia::draw(modok$gam)
+plot(modok$gam, pages = 1, shade = TRUE)
+
+#Extraire les estimations de l’effet lissé
+smooth_df <- smooth_estimates(mod_base$gam, smooth = "s(SPEI_har_pond)")
+
+ggplot(smooth_df, aes(x = SPEI_har_pond, y = .estimate)) +
+  geom_ribbon(aes(ymin = .estimate - 2 * .se, ymax = .estimate + 2 * .se), fill = "grey80") +
+  geom_line(color = "blue", size = 1) +
+  labs(x = "SPEI (harvest period)", 
+       y = "Smooth effect on log-odds of provisioning") +
+  theme_classic(base_size = 14)
+
+gam_part <- mod_base$gam
+
+# Plot de la spline
+plot(gam_part, select = 1, se = TRUE, shade = TRUE,
+     main = "Effet lissé de SPEI_har_pond", xlab = "SPEI_har_pond", ylab = "Effet lissé")
+
+draw(gam_part, select = "s(SPEI_har_pond)", residuals = TRUE)
+
+###Effets fixes catégoriels
+
+#grille de prédictions
+
+newdat <- expand.grid(
+  SEX = levels(test$SEX),
+  PRODUCTION_envol = levels(test$PRODUCTION_envol)[1],  # Fixer les autres facteurs
+  CHICKAGE = levels(test$CHICKAGE)[1],
+  SPEI_har_pond = mean(test$SPEI_har_pond),
+  device = NA  # facultatif si présent dans le modèle
+)
+
+newdat$pred <- predict(mod_base$gam, newdata = newdat, type = "response", se.fit = TRUE)$fit
+newdat$se <- predict(mod_base$gam, newdata = newdat, type = "response", se.fit = TRUE)$se.fit
+
+ggplot(newdat, aes(x = SEX, y = pred, ymin = pred - 1.96 * se, ymax = pred + 1.96 * se)) +
+  geom_pointrange() +
+  theme_minimal() +
+  ylab("Probabilité prédite") +
+  xlab("Sexe") +
+  ggtitle("Effet marginal de SEX sur la probabilité prédite")
+
+
+newdat <- expand.grid(
+  SEX = levels(test$SEX),
+  CHICKAGE = levels(test$CHICKAGE),
+  PRODUCTION_envol = levels(test$PRODUCTION_envol),
+  SPEI_har_pond = mean(test$SPEI_har_pond),
+  device = NA  # pour ignorer l'effet aléatoire si nécessaire
+)
+
+preds <- predict(mod_base$gam, newdata = newdat, type = "link", se.fit = TRUE)
+
+# Ajout au tableau
+newdat <- newdat %>%
+  mutate(
+    fit_link = preds$fit,
+    se_link = preds$se.fit,
+    fit = plogis(fit_link),  # passage à la probabilité (lien logit inversé)
+    lower = plogis(fit_link - 1.96 * se_link),
+    upper = plogis(fit_link + 1.96 * se_link)
+  )
+
+
+#ajouter poits bruts
+ggplot(newdat, aes(x = PRODUCTION_envol, y = fit, color = SEX, group = SEX)) +
+  # Points bruts
+  geom_jitter(
+    data = test,
+    aes(x = PRODUCTION_envol, y = prop_foraging, color = SEX),
+    width = 0.2, height = 0.02, alpha = 0.3,
+    inherit.aes = FALSE
+  ) +
+  # Moyennes prédictives
+  geom_point(position = position_dodge(width = 0.3), size = 2) +
+  geom_errorbar(
+    aes(ymin = lower, ymax = upper),
+    width = 0.2,
+    position = position_dodge(width = 0.3)
+  ) +
+  facet_wrap(~CHICKAGE) +
+  theme_classic() +
+  labs(
+    title = "Effets combinés de SEX, CHICKAGE et PRODUCTION_envol",
+    y = "Probabilité prédite / Observée (prop_foraging)",
+    x = "Production"
+  )
+
+
+###Propre
+ggplot(newdat, aes(x = as.factor(CHICKAGE), y = fit, color = SEX)) +
+  # Points bruts en arrière-plan (noirs)
+  geom_jitter(
+    data = test,
+    aes(x = CHICKAGE, y = prop_foraging, group = PRODUCTION_envol),
+    inherit.aes = FALSE,
+    alpha = 0.7,
+    width = 0.2,
+    color = "black", shape = 16, size = 0.8
+  ) +
+  # Points estimés + IC
+  geom_pointrange(
+    aes(ymin = lower, ymax = upper, group = SEX),
+    position = position_dodge(width = 0.5),
+    size = 0.8
+  ) +
+  facet_wrap(~PRODUCTION_envol, scales = "free_x", drop = FALSE) +
+  labs(
+    x = NULL,
+    y = "Probabilité prédite de foraging",
+    color = NULL
+  ) +
+  theme_classic(base_size = 14)
+
+### Avec ggpredict
+effs_prop <- ggpredict(mod_base$gam, terms = c("CHICKAGE", "SEX", "PRODUCTION_envol"))
+
+# Tracer les effets barplot avec IC
+ggplot(effs_prop, aes(x = x, y = predicted, fill = group)) +
+  geom_col(position = position_dodge(width = 0.9), alpha = 0.7) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                width = 0.2,
+                position = position_dodge(width = 0.9)) +
+  facet_wrap(~facet, scales = "free_x") +
+  labs(
+    x = NULL,
+    y = "%foraging",
+    color = NULL
+  ) +
+  theme_classic(base_size = 14)
+
+
+test$facet <- test$PRODUCTION_envol
+
+ggplot(effs_prop, aes(x = x, y = predicted, color = group)) +
+  geom_jitter(
+    data = test,
+    aes(x = as.factor(CHICKAGE), y = prop_foraging, color = SEX),
+    inherit.aes = FALSE,
+    size = 1,
+    alpha = 0.5,
+    width = 0.2,
+  ) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high),
+                  position = position_dodge(width = 0.5),
+                  size = 1.2, fatten = 1.3) +
+  facet_wrap(~facet, scales = "free_x") +
+  scale_color_manual(
+    values = c("F" = "red", "M" = "deepskyblue")  # adapte selon les niveaux de 'group'
+  ) +
+  labs(
+    x = NULL,
+    y = "%foraging",
+    color = NULL
+  ) +
+  theme_classic(base_size = 14)
+
+#EFFET SPEI
+
+eff_spei <- ggpredict(mod_base, terms = "SPEI_har_pond", bias_correction = TRUE, ci_level = 0.95) #if TRUE, adjusts for bias-correction when back-transforming the predicted values (to the response scale) for non-Gaussian mixed models. 
+
+ggplot() +
+  # Points bruts (valeurs observées)
+  geom_point(data = test, aes(x = SPEI_har_pond, y = prop_foraging),
+             alpha = 0.4, color = "black", shape = 16) +
+  # Courbe prédite
+  geom_line(data = eff_spei, aes(x = x, y = predicted), color = "black", size = 1) +
+  # Intervalle de confiance
+  geom_ribbon(data = eff_spei, aes(x = x, ymin = conf.low, ymax = conf.high),
+              fill = "deepskyblue", alpha = 0.2) +
+  # Labels
+  labs(
+    title = "",
+    x = "SPEI",
+    y = "% foraging prédit"
+  ) +
+  theme_classic(base_size = 14)
+
+###############################
+#Avec interaction
+
+mod <- gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE +
+    s(SPEI_har_pond, by = PRODUCTION_envol, bs = "cr", k = 3),
+  random = list(device = ~1),
+  family = binomial(link = "logit"),
+  method = "REML",
+  data = test
+)
+
+gam_mod <- mod$gam
+
+plot(gam_mod, pages = 1, shade = TRUE, seWithMean = TRUE)
+
+library(visreg)
+visreg(gam_mod, "SPEI_har_pond", by = "PRODUCTION_envol",
+       scale = "response", rug = FALSE, gg = TRUE, data = test) +
+  ggplot2::labs(title = "Effet de SPEI par prod",
+                y = "Probabilité de marcher",
+                x = "SPEI")
+
+#################### 3 interactions
+
+test$group <- interaction(test$SEX, test$PRODUCTION_envol, test$CHICKAGE)
+mod <- gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE +
+    s(SPEI_har_pond, by = group, bs = "cr", k = 3),
+  random = list(device = ~1),
+  family = binomial,
+  data = test
+)
+gam_mod <- mod$gam
+library(gratia)
+
+draw(gam_mod, select = NULL, ncol = 3, scales = "free") +
+  ggplot2::ggtitle("Effet de SPEI par combinaison de facteurs")
+
+
+
+mod <- gamm(
+  ratio ~ SEX + PRODUCTION_envol + CHICKAGE +
+    s(SPEI_har_pond, by = PRODUCTION_envol, bs = "cr", k = 3),
+  random = list(device = ~1),
+  family = binomial,
+  data = test
+)
+gam_mod <- mod$gam
+library(gratia)
+
+draw(gam_mod, select = NULL, ncol = 3, scales = "free") +
+  ggplot2::ggtitle("Effet de SPEI par combinaison de facteurs")
+
+```
